@@ -122,8 +122,8 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 }
 .tab-btn.active{color:var(--brass);border-bottom-color:var(--brass);}
 
-.filter-row{margin-bottom:14px;}
-.filter-row select{margin-bottom:0;}
+.filter-row{margin-bottom:14px;display:flex;gap:10px;}
+.filter-row select{margin-bottom:0;flex:1;min-width:0;}
 
 .file-list{display:flex;flex-direction:column;gap:10px;}
 .file-card{

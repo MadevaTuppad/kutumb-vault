@@ -234,6 +234,33 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
    ============================================================ */
 let allFiles = [];
 let activeTab = "mine"; // "mine" | "family"
+let memberFilter = ""; // uploader email, "" = all
+
+function populateMemberFilter() {
+  const select = document.getElementById("memberFilterSelect");
+  const previousValue = select.value;
+
+  // Distinct uploaders, sorted by display name.
+  const seen = new Map(); // email -> name
+  for (const f of allFiles) {
+    if (!seen.has(f.uploader)) seen.set(f.uploader, f.uploaderName || f.uploader);
+  }
+  const members = [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+
+  select.innerHTML = '<option value="">All family members</option>';
+  for (const [email, name] of members) {
+    const opt = document.createElement("option");
+    opt.value = email;
+    opt.textContent = name;
+    select.appendChild(opt);
+  }
+  // Keep the previous selection if that member still has files.
+  if (previousValue && seen.has(previousValue)) {
+    select.value = previousValue;
+  } else {
+    memberFilter = "";
+  }
+}
 
 async function loadFileList() {
   const listStatus = document.getElementById("listStatus");
@@ -245,6 +272,7 @@ async function loadFileList() {
       return;
     }
     allFiles = res.files;
+    populateMemberFilter();
     renderFileList();
   } catch {
     setStatus(listStatus, "Couldn't reach the vault backend.", "error");
@@ -258,7 +286,7 @@ function renderFileList() {
 
   let scoped = activeTab === "mine"
     ? allFiles.filter(f => f.uploader === currentUser.email)
-    : allFiles;
+    : (memberFilter ? allFiles.filter(f => f.uploader === memberFilter) : allFiles);
 
   const filtered = filterVal ? scoped.filter(f => f.idType === filterVal) : scoped;
 
@@ -272,14 +300,25 @@ function renderFileList() {
 
 document.getElementById("filterSelect").addEventListener("change", renderFileList);
 
+document.getElementById("memberFilterSelect").addEventListener("change", (e) => {
+  memberFilter = e.target.value;
+  renderFileList();
+});
+
 function setActiveTab(tab) {
   activeTab = tab;
   const mineBtn = document.getElementById("tabMine");
   const familyBtn = document.getElementById("tabFamily");
+  const memberSelect = document.getElementById("memberFilterSelect");
   mineBtn.classList.toggle("active", tab === "mine");
   familyBtn.classList.toggle("active", tab === "family");
   mineBtn.setAttribute("aria-selected", tab === "mine");
   familyBtn.setAttribute("aria-selected", tab === "family");
+  memberSelect.classList.toggle("hidden", tab !== "family");
+  if (tab !== "family") {
+    memberFilter = "";
+    memberSelect.value = "";
+  }
   renderFileList();
 }
 document.getElementById("tabMine").addEventListener("click", () => setActiveTab("mine"));
