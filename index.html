@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Kutumb Vault</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <circle cx="12" cy="9" r="5.2" fill="none" stroke="currentColor" stroke-width="1.6"/>
+        <rect x="10.6" y="12.5" width="2.8" height="6" rx="1" fill="currentColor"/>
+      </svg>
+      <span>Kutumb Vault</span>
+    </div>
+    <div id="userBadge" class="user-badge hidden">
+      <span id="userName"></span>
+      <button id="lockBtn" class="link-btn">Lock vault</button>
+      <button id="signOutBtn" class="link-btn">Sign out</button>
+    </div>
+  </header>
+
+  <!-- SCREEN 1: Sign in -->
+  <section id="screenSignIn" class="screen center-card">
+    <div class="card">
+      <h1>Unlock Kutumb Vault</h1>
+      <p class="muted">Sign in with the Google account your family added to the allow list.</p>
+      <div id="g_id_onload"
+           data-client_id="YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com"
+           data-callback="handleCredentialResponse"
+           data-auto_prompt="false">
+      </div>
+      <div class="g_id_signin"
+           data-type="standard"
+           data-theme="filled_black"
+           data-size="large"
+           data-shape="pill"
+           data-text="signin_with">
+      </div>
+      <p id="signInStatus" class="status"></p>
+    </div>
+  </section>
+
+  <!-- SCREEN 2: Passphrase unlock -->
+  <section id="screenPassphrase" class="screen center-card hidden">
+    <div class="card">
+      <h1>Enter the family passphrase</h1>
+      <p class="muted">This unlocks the encryption key on this device only. It is never sent anywhere. Note: a wrong passphrase won't show an error here — it'll only fail later, when you try to open a document.</p>
+      <form id="passphraseForm">
+        <input type="password" id="passphraseInput" placeholder="Family passphrase" autocomplete="off" required>
+        <button type="submit" class="primary-btn">Unlock vault</button>
+      </form>
+      <p id="passphraseStatus" class="status"></p>
+    </div>
+  </section>
+
+  <!-- SCREEN 3: Dashboard (default landing after unlock) -->
+  <section id="screenVault" class="screen hidden">
+    <button id="openUploadBtn" class="primary-btn upload-cta">+ Upload new ID</button>
+
+    <h2 class="section-title">Stored documents</h2>
+    <div class="tab-row" role="tablist">
+      <button id="tabMine" class="tab-btn active" role="tab" aria-selected="true">My IDs</button>
+      <button id="tabFamily" class="tab-btn" role="tab" aria-selected="false">Family</button>
+    </div>
+    <div class="filter-row">
+      <select id="filterSelect">
+        <option value="">All document types</option>
+        <option value="Aadhaar">Aadhaar</option>
+        <option value="PAN">PAN</option>
+        <option value="Passport">Passport</option>
+        <option value="Driving Licence">Driving Licence</option>
+        <option value="Voter ID">Voter ID</option>
+        <option value="Other">Other</option>
+      </select>
+    </div>
+    <div id="fileList" class="file-list"></div>
+    <p id="listStatus" class="status"></p>
+  </section>
+
+  <!-- SCREEN 4: Upload (separate page, reached via the dashboard button) -->
+  <section id="screenUpload" class="screen hidden">
+    <button id="backToVaultBtn" class="link-btn back-btn">&larr; Back to documents</button>
+    <div class="upload-panel">
+      <label for="idTypeSelect" class="muted small" style="display:block;margin-bottom:6px;">Document type</label>
+      <select id="idTypeSelect" required>
+        <option value="" disabled selected>Select ID type</option>
+        <option value="Aadhaar">Aadhaar</option>
+        <option value="PAN">PAN</option>
+        <option value="Passport">Passport</option>
+        <option value="Driving Licence">Driving Licence</option>
+        <option value="Voter ID">Voter ID</option>
+        <option value="Other">Other</option>
+      </select>
+      <label for="fileInput" class="upload-drop">
+        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M12 16V4M12 4L7 9M12 4l5 5M5 20h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Take a photo or choose from gallery</span>
+        <span class="muted small">Encrypted on this device before it ever leaves</span>
+      </label>
+      <input type="file" id="fileInput" accept="image/*" class="visually-hidden">
+      <p id="uploadStatus" class="status"></p>
+    </div>
+  </section>
+
+</div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="app.js"></script>
+</body>
+</html>
