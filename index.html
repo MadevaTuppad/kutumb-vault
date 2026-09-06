@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Kutumb Vault</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -34,6 +34,7 @@
     <div class="card">
       <h1>Unlock Kutumb Vault</h1>
       <p class="muted">Sign in with the Google account your family added to the allow list.</p>
+      <p class="muted small">Open this link in Safari or Chrome directly &mdash; sign-in won't work inside an in-app browser (e.g. WhatsApp, Instagram, Gmail).</p>
       <div id="g_id_onload"
            data-client_id="1063516130206-mpm57j97700jaqtqgj6go7p6bnd75k87.apps.googleusercontent.com"
            data-callback="handleCredentialResponse"
@@ -103,10 +104,10 @@
       </select>
       <label for="fileInput" class="upload-drop">
         <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M12 16V4M12 4L7 9M12 4l5 5M5 20h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <span>Take a photo or choose from gallery</span>
+        <span>Take a photo, or choose an image or PDF</span>
         <span class="muted small">Encrypted on this device before it ever leaves</span>
       </label>
-      <input type="file" id="fileInput" accept="image/*" class="visually-hidden">
+      <input type="file" id="fileInput" accept="image/*,application/pdf" class="visually-hidden">
       <p id="uploadStatus" class="status"></p>
     </div>
   </section>

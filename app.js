@@ -45,6 +45,24 @@ function showScreen(id) {
   });
 }
 
+/* ------------------------------------------------------------
+   iOS Safari needs different handling than Android Chrome for
+   opening/downloading blob URLs — see comments at each call site.
+   ------------------------------------------------------------ */
+function isIOS() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); // iPadOS reports as Mac
+}
+
+function extFromMimetype(mimetype) {
+  const mt = (mimetype || "").toLowerCase();
+  if (mt.includes("pdf")) return "pdf";
+  if (mt.includes("png")) return "png";
+  if (mt.includes("webp")) return "webp";
+  if (mt.includes("heic") || mt.includes("heif")) return "heic";
+  return "jpg";
+}
+
 /* ============================================================
    Backend calls
    NOTE: Content-Type is deliberately "text/plain" (not
@@ -273,6 +291,11 @@ function buildFileCard(meta) {
 
   const thumb = document.createElement("div");
   thumb.className = "file-thumb";
+  const isPdf = (meta.mimetype || "").toLowerCase().includes("pdf");
+  if (isPdf) {
+    thumb.classList.add("file-thumb-pdf");
+    thumb.textContent = "PDF";
+  }
   card.appendChild(thumb);
 
   const metaEl = document.createElement("div");
@@ -312,30 +335,58 @@ function buildFileCard(meta) {
       base64ToBytes(meta.ivBase64)
     );
     decryptedBlob = new Blob([plainBytes], { type: meta.mimetype || "image/jpeg" });
-    thumb.style.backgroundImage = `url(${URL.createObjectURL(decryptedBlob)})`;
-    thumb.style.backgroundSize = "cover";
-    thumb.style.backgroundPosition = "center";
+    if (!isPdf) {
+      thumb.style.backgroundImage = `url(${URL.createObjectURL(decryptedBlob)})`;
+      thumb.style.backgroundSize = "cover";
+      thumb.style.backgroundPosition = "center";
+    }
     return decryptedBlob;
   }
 
   viewBtn.addEventListener("click", async () => {
+    // iOS Safari's popup blocker only allows window.open() when called
+    // synchronously from the click — not after an awaited decrypt. So we
+    // open a blank tab right away and fill in its location once ready.
+    const tab = isIOS() ? window.open("", "_blank") : null;
     try {
       const blob = await ensureDecrypted();
-      window.open(URL.createObjectURL(blob), "_blank");
+      const url = URL.createObjectURL(blob);
+      if (tab) {
+        tab.location.href = url;
+      } else {
+        window.open(url, "_blank");
+      }
     } catch {
+      if (tab) tab.close();
       alert("Couldn't decrypt this file — check the passphrase.");
     }
   });
 
   downloadBtn.addEventListener("click", async () => {
+    const filenameBase = (meta.idType || "id-document").replace(/\s+/g, "-").toLowerCase();
+    // iOS Safari ignores the `download` attribute on blob URLs — it just
+    // navigates to the file instead of saving it. So on iOS we open the
+    // file (same synchronous-tab trick as View) and let the person use
+    // the native share sheet's "Save to Files" / "Save Image" action.
+    // Android Chrome honors `download` correctly, so it keeps the
+    // straightforward anchor-click approach.
+    const tab = isIOS() ? window.open("", "_blank") : null;
     try {
       const blob = await ensureDecrypted();
-      const ext = (meta.mimetype || "").includes("png") ? "png" : "jpg";
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${(meta.idType || "id-document").replace(/\s+/g, "-").toLowerCase()}.${ext}`;
-      a.click();
+      const ext = extFromMimetype(meta.mimetype);
+      const url = URL.createObjectURL(blob);
+      if (tab) {
+        tab.location.href = url;
+        setStatus(document.getElementById("listStatus"),
+          "Opened the file — use the share icon to save it to Files/Photos.", "success");
+      } else {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${filenameBase}.${ext}`;
+        a.click();
+      }
     } catch {
+      if (tab) tab.close();
       alert("Couldn't decrypt this file — check the passphrase.");
     }
   });
@@ -343,13 +394,14 @@ function buildFileCard(meta) {
   shareBtn.addEventListener("click", async () => {
     try {
       const blob = await ensureDecrypted();
-      const fileForShare = new File([blob], "id-document.jpg", { type: blob.type });
+      const ext = extFromMimetype(meta.mimetype);
+      const fileForShare = new File([blob], `id-document.${ext}`, { type: blob.type });
       if (navigator.canShare && navigator.canShare({ files: [fileForShare] })) {
         await navigator.share({ files: [fileForShare], title: "ID document" });
       } else {
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
-        a.download = "id-document.jpg";
+        a.download = `id-document.${ext}`;
         a.click();
       }
     } catch {
