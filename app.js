@@ -236,6 +236,30 @@ let allFiles = [];
 let activeTab = "mine"; // "mine" | "family"
 let memberFilter = ""; // uploader email, "" = all
 
+/* ------------------------------------------------------------
+   Thumbnails auto-decrypt as their card scrolls into view (the
+   vault is already unlocked at this point, so this doesn't reveal
+   anything a manual "View" click wouldn't — it just avoids the
+   empty placeholder box until the user taps a button). Lazy via
+   IntersectionObserver so it only loads what's actually visible,
+   not every document at once.
+   ------------------------------------------------------------ */
+const thumbLoaders = new WeakMap(); // thumb element -> load function
+const cardCleanups = new WeakMap(); // card element -> cleanup function, run just before the card is discarded
+const thumbObserver = ("IntersectionObserver" in window)
+  ? new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const load = thumbLoaders.get(entry.target);
+        if (load) {
+          thumbObserver.unobserve(entry.target);
+          thumbLoaders.delete(entry.target);
+          load();
+        }
+      }
+    }, { rootMargin: "200px" })
+  : null;
+
 function populateMemberFilter() {
   const select = document.getElementById("memberFilterSelect");
   const previousValue = select.value;
@@ -290,6 +314,14 @@ function renderFileList() {
 
   const filtered = filterVal ? scoped.filter(f => f.idType === filterVal) : scoped;
 
+  // Release resources held by the cards about to be discarded: revoke any
+  // decrypted blob URL, and stop observing thumbnails that never scrolled
+  // into view (otherwise IntersectionObserver keeps a reference to the
+  // detached element forever, leaking memory across repeated re-renders).
+  for (const oldCard of listEl.children) {
+    const cleanup = cardCleanups.get(oldCard);
+    if (cleanup) cleanup();
+  }
   listEl.innerHTML = "";
   for (const meta of filtered) {
     listEl.appendChild(buildFileCard(meta));
@@ -334,13 +366,28 @@ function buildFileCard(meta) {
   if (isPdf) {
     thumb.classList.add("file-thumb-pdf");
     thumb.textContent = "PDF";
+  } else {
+    thumb.classList.add("file-thumb-loading");
   }
   card.appendChild(thumb);
 
   const metaEl = document.createElement("div");
   metaEl.className = "file-meta";
-  metaEl.innerHTML = `<div class="who">${meta.idType ? meta.idType + " — " : ""}${meta.uploaderName || meta.uploader}</div>
-                      <div class="when">${new Date(meta.date).toLocaleString()}</div>`;
+
+  const whoEl = document.createElement("div");
+  whoEl.className = "who";
+  // Built with textContent, not innerHTML — meta.idType is technically
+  // attacker-controllable (a family member could bypass the <select> and
+  // POST an arbitrary string to the backend), so it must never be treated
+  // as HTML here.
+  whoEl.textContent = (meta.idType ? meta.idType + " — " : "") + (meta.uploaderName || meta.uploader);
+  metaEl.appendChild(whoEl);
+
+  const whenEl = document.createElement("div");
+  whenEl.className = "when";
+  whenEl.textContent = new Date(meta.date).toLocaleString();
+  metaEl.appendChild(whenEl);
+
   card.appendChild(metaEl);
 
   const actions = document.createElement("div");
@@ -364,22 +411,60 @@ function buildFileCard(meta) {
   card.appendChild(actions);
 
   let decryptedBlob = null; // cached after first decrypt, per session only
+  let decryptedUrl = null;  // one object URL reused by thumbnail/View/Download, revoked on cleanup
+  let decryptPromise = null; // in-flight/cached promise — prevents duplicate concurrent decrypts
 
-  async function ensureDecrypted() {
-    if (decryptedBlob) return decryptedBlob;
-    const res = await callBackend("getFile", { idToken, driveFileId: meta.driveFileId });
-    if (!res.ok) throw new Error(res.error || "fetch failed");
-    const plainBytes = await decryptBytes(
-      base64ToBytes(res.ciphertextBase64),
-      base64ToBytes(meta.ivBase64)
-    );
-    decryptedBlob = new Blob([plainBytes], { type: meta.mimetype || "image/jpeg" });
-    if (!isPdf) {
-      thumb.style.backgroundImage = `url(${URL.createObjectURL(decryptedBlob)})`;
-      thumb.style.backgroundSize = "cover";
-      thumb.style.backgroundPosition = "center";
+  function ensureDecrypted() {
+    if (decryptPromise) return decryptPromise; // covers both "already decrypted" and "decrypt in progress"
+    decryptPromise = (async () => {
+      const res = await callBackend("getFile", { idToken, driveFileId: meta.driveFileId });
+      if (!res.ok) throw new Error(res.error || "fetch failed");
+      const plainBytes = await decryptBytes(
+        base64ToBytes(res.ciphertextBase64),
+        base64ToBytes(meta.ivBase64)
+      );
+      decryptedBlob = new Blob([plainBytes], { type: meta.mimetype || "image/jpeg" });
+      decryptedUrl = URL.createObjectURL(decryptedBlob);
+      if (!isPdf) {
+        thumb.classList.remove("file-thumb-loading");
+        thumb.style.backgroundImage = `url(${decryptedUrl})`;
+        thumb.style.backgroundSize = "cover";
+        thumb.style.backgroundPosition = "center";
+      }
+      return decryptedBlob;
+    })();
+    // Don't permanently cache a failure — let the next call (e.g. a manual
+    // "View" tap after the auto-load silently failed) retry from scratch.
+    decryptPromise.catch(() => { decryptPromise = null; });
+    return decryptPromise;
+  }
+
+  cardCleanups.set(card, () => {
+    if (decryptedUrl) URL.revokeObjectURL(decryptedUrl);
+    if (thumbObserver) {
+      thumbObserver.unobserve(thumb);
+      thumbLoaders.delete(thumb);
     }
-    return decryptedBlob;
+  });
+
+  // Auto-load the thumbnail once this card scrolls into view.
+  if (!isPdf) {
+    const autoLoad = () => {
+      ensureDecrypted().catch(() => {
+        // Wrong passphrase or fetch failure — don't alert for an
+        // automatic background load; just stop showing the spinner
+        // and fall back to a plain placeholder. The user will still
+        // see a clear error if they tap View/Download/Share.
+        thumb.classList.remove("file-thumb-loading");
+        thumb.classList.add("file-thumb-error");
+      });
+    };
+    if (thumbObserver) {
+      thumbLoaders.set(thumb, autoLoad);
+      thumbObserver.observe(thumb);
+    } else {
+      autoLoad(); // no IntersectionObserver support — just load immediately
+    }
   }
 
   viewBtn.addEventListener("click", async () => {
@@ -388,12 +473,11 @@ function buildFileCard(meta) {
     // open a blank tab right away and fill in its location once ready.
     const tab = isIOS() ? window.open("", "_blank") : null;
     try {
-      const blob = await ensureDecrypted();
-      const url = URL.createObjectURL(blob);
+      await ensureDecrypted();
       if (tab) {
-        tab.location.href = url;
+        tab.location.href = decryptedUrl;
       } else {
-        window.open(url, "_blank");
+        window.open(decryptedUrl, "_blank");
       }
     } catch {
       if (tab) tab.close();
@@ -411,16 +495,15 @@ function buildFileCard(meta) {
     // straightforward anchor-click approach.
     const tab = isIOS() ? window.open("", "_blank") : null;
     try {
-      const blob = await ensureDecrypted();
+      await ensureDecrypted();
       const ext = extFromMimetype(meta.mimetype);
-      const url = URL.createObjectURL(blob);
       if (tab) {
-        tab.location.href = url;
+        tab.location.href = decryptedUrl;
         setStatus(document.getElementById("listStatus"),
           "Opened the file — use the share icon to save it to Files/Photos.", "success");
       } else {
         const a = document.createElement("a");
-        a.href = url;
+        a.href = decryptedUrl;
         a.download = `${filenameBase}.${ext}`;
         a.click();
       }
@@ -439,7 +522,7 @@ function buildFileCard(meta) {
         await navigator.share({ files: [fileForShare], title: "ID document" });
       } else {
         const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
+        a.href = decryptedUrl;
         a.download = `id-document.${ext}`;
         a.click();
       }
