@@ -357,6 +357,7 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
   clearButtonLoading(submitBtn);
   showScreen("screenVault");
   loadFileList();
+  loadDependents();
 });
 
 /* ============================================================
@@ -416,6 +417,121 @@ document.querySelectorAll("#idCategoryTabs .tab-btn").forEach(btn => {
 });
 populateIdTypeOptions("official"); // initial state matches the tab marked active in the HTML
 
+/* ------------------------------------------------------------
+   Dependents — family members without their own Google account
+   (e.g. a parent without a phone). A guardian (an account holder
+   listed in her GuardianEmails, enforced server-side) uploads on her
+   behalf. listDependents only ever returns dependents the CURRENT
+   user is a guardian of — someone unrelated to her never sees her as
+   an upload option, though her documents remain visible to the whole
+   family via the normal Family tab regardless (viewing was never
+   restricted, only who can add/manage her documents is).
+   ------------------------------------------------------------ */
+let dependents = []; // only MY dependents — [{ name, addedAt }]
+let myDependentNames = new Set(); // same data, as a Set, for quick lookups (delete-menu gating)
+
+async function loadDependents() {
+  try {
+    const res = await callBackend("listDependents", { idToken });
+    if (res.ok) {
+      dependents = res.dependents;
+      myDependentNames = new Set(dependents.map(d => d.name));
+      populateSubjectSelect();
+    }
+  } catch (err) {
+    // Non-fatal — the dropdown just won't offer any dependents yet;
+    // "Myself" and "+ Add a family member…" still work.
+  }
+}
+
+function populateSubjectSelect(selectedName) {
+  const select = document.getElementById("subjectSelect");
+  const previousValue = selectedName !== undefined ? selectedName : select.value;
+  select.innerHTML = '';
+  const myselfOpt = document.createElement("option");
+  myselfOpt.value = "";
+  myselfOpt.textContent = "Myself";
+  select.appendChild(myselfOpt);
+  for (const dep of dependents) {
+    const opt = document.createElement("option");
+    opt.value = dep.name;
+    opt.textContent = dep.name;
+    select.appendChild(opt);
+  }
+  const addOpt = document.createElement("option");
+  addOpt.value = "__add_new__";
+  addOpt.textContent = "+ Add a family member…";
+  select.appendChild(addOpt);
+  if (dependents.length > 0) {
+    const manageOpt = document.createElement("option");
+    manageOpt.value = "__manage__";
+    manageOpt.textContent = "Manage family members…";
+    select.appendChild(manageOpt);
+  }
+
+  if (previousValue && [...select.options].some(o => o.value === previousValue)) {
+    select.value = previousValue;
+  }
+}
+
+document.getElementById("subjectSelect").addEventListener("change", async (e) => {
+  const select = e.target;
+
+  if (select.value === "__manage__") {
+    select.value = ""; // this option only ever triggers an action, never stays selected
+    // Lightweight text-based removal flow — deliberately no new screen.
+    // Only ever offers MY dependents, since `dependents` already only
+    // contains ones I'm a guardian of.
+    const listText = dependents.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
+    const choice = prompt(`Remove which family member?\n${listText}\n\nType the number, or Cancel to keep everyone.`);
+    if (!choice) return;
+    const idx = parseInt(choice, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= dependents.length) {
+      alert("Didn't recognize that number — nothing was removed.");
+      return;
+    }
+    const target = dependents[idx];
+    if (!confirm(`Remove "${target.name}"? Her already-uploaded documents stay in the vault, just tagged as before — this only stops her being offered for new uploads.`)) {
+      return;
+    }
+    try {
+      const res = await callBackend("deleteDependent", { idToken, name: target.name });
+      if (!res.ok) {
+        alert("Couldn't remove her: " + (res.error || "unknown error"));
+        return;
+      }
+      await loadDependents();
+    } catch (err) {
+      alert(err.message || "Couldn't remove that family member.");
+    }
+    return;
+  }
+
+  if (select.value !== "__add_new__") return;
+
+  const name = (prompt("Family member's name (e.g. \"Mother\"):") || "").trim();
+  if (!name) {
+    select.value = ""; // back to "Myself" — nothing was entered
+    return;
+  }
+
+  try {
+    const res = await callBackend("addDependent", { idToken, name });
+    if (!res.ok) {
+      alert(res.error === "duplicate_name"
+        ? "That name is already on the list."
+        : "Couldn't add that family member: " + (res.error || "unknown error"));
+      select.value = "";
+      return;
+    }
+    await loadDependents();
+    populateSubjectSelect(name); // select the one just added
+  } catch (err) {
+    alert(err.message || "Couldn't add that family member.");
+    select.value = "";
+  }
+});
+
 document.getElementById("openUploadBtn").addEventListener("click", () => {
   showScreen("screenUpload");
 });
@@ -430,6 +546,9 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
   const inputEl = e.target;
   const idTypeSelect = document.getElementById("idTypeSelect");
   const idType = idTypeSelect.value;
+  const subjectSelect = document.getElementById("subjectSelect");
+  const rawSubjectValue = subjectSelect.value;
+  const subjectName = (rawSubjectValue === "__add_new__" || rawSubjectValue === "__manage__") ? "" : rawSubjectValue; // "" = myself
 
   if (!idType) {
     setStatus(statusEl, "Choose a document type before uploading.", "error");
@@ -444,18 +563,20 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
   }
 
   // Warn before silently creating a second copy of the same document type.
-  // Matches on ID type + broad media category (image vs PDF) — a JPEG
-  // replacing a PNG of the same ID still counts as "the same document",
-  // but a PDF doesn't collide with an existing image of the same type.
+  // Matches on ID type + broad media category (image vs PDF) + who it
+  // belongs to. For my own documents, only my own uploads count. For a
+  // dependent's documents, ANY guardian's upload counts — co-guardians
+  // share responsibility for the same person's documents.
   const newIsPdf = (file.type || "").toLowerCase().includes("pdf");
   const existing = allFiles.find(f =>
-    f.uploader === currentUser.email &&
+    (subjectName ? true : f.uploader === currentUser.email) &&
     f.idType === idType &&
+    (f.subjectName || "") === subjectName &&
     ((f.mimetype || "").toLowerCase().includes("pdf")) === newIsPdf
   );
   if (existing) {
     const kindLabel = newIsPdf ? "PDF" : "image";
-    const proceed = confirm(`You already have a ${idType} (${kindLabel}) in the vault. Replace it with this new one?`);
+    const proceed = confirm(`${subjectName ? subjectName : "You"} already ${subjectName ? "has" : "have"} a ${idType} (${kindLabel}) in the vault. Replace it with this new one?`);
     if (!proceed) {
       inputEl.value = "";
       return;
@@ -474,6 +595,7 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
       ivBase64: bytesToBase64(iv),
       mimetype: file.type || "image/jpeg",
       idType,
+      subjectName,
     });
     if (!res.ok) {
       setStatus(statusEl, "Upload failed: " + (res.error || "unknown error"), "error");
@@ -494,6 +616,9 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
     setStatus(statusEl, existing ? "Replaced in the vault." : "Saved to the vault.", "success");
     inputEl.value = "";
     idTypeSelect.selectedIndex = 0;
+    // Subject selection (Myself / a dependent) intentionally stays as-is —
+    // convenient when uploading several documents for the same person in
+    // a row, same reasoning as keeping the category tab selection.
     loadFileList();
     setTimeout(() => showScreen("screenVault"), 700);
   } catch (err) {
@@ -543,21 +668,33 @@ const thumbObserver = ("IntersectionObserver" in window)
     }, { rootMargin: "200px" })
   : null;
 
+// A document either belongs to the account holder who uploaded it, or
+// to a dependent they uploaded it on behalf of. These two helpers give
+// a single consistent identity/display-name across both cases, used by
+// the member filter and the file card's "who" label.
+function subjectKeyOf(f) {
+  return f.subjectName ? "dep:" + f.subjectName : f.uploader;
+}
+function subjectDisplayNameOf(f) {
+  return f.subjectName || f.uploaderName || f.uploader;
+}
+
 function populateMemberFilter() {
   const select = document.getElementById("memberFilterSelect");
   const previousValue = select.value;
 
-  // Distinct uploaders, sorted by display name.
-  const seen = new Map(); // email -> name
+  // Distinct subjects (account holders + dependents), sorted by name.
+  const seen = new Map(); // subjectKey -> display name
   for (const f of allFiles) {
-    if (!seen.has(f.uploader)) seen.set(f.uploader, f.uploaderName || f.uploader);
+    const key = subjectKeyOf(f);
+    if (!seen.has(key)) seen.set(key, subjectDisplayNameOf(f));
   }
   const members = [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
 
   select.innerHTML = '<option value="">All family members</option>';
-  for (const [email, name] of members) {
+  for (const [key, name] of members) {
     const opt = document.createElement("option");
-    opt.value = email;
+    opt.value = key;
     opt.textContent = name;
     select.appendChild(opt);
   }
@@ -611,8 +748,8 @@ function renderFileList() {
   const filterVal = document.getElementById("filterSelect").value;
 
   let scoped = activeTab === "mine"
-    ? allFiles.filter(f => f.uploader === currentUser.email)
-    : (memberFilter ? allFiles.filter(f => f.uploader === memberFilter) : allFiles);
+    ? allFiles.filter(f => !f.subjectName && f.uploader === currentUser.email)
+    : (memberFilter ? allFiles.filter(f => subjectKeyOf(f) === memberFilter) : allFiles);
 
   const filtered = filterVal ? scoped.filter(f => f.idType === filterVal) : scoped;
 
@@ -682,7 +819,7 @@ function buildFileCard(meta) {
   // attacker-controllable (a family member could bypass the <select> and
   // POST an arbitrary string to the backend), so it must never be treated
   // as HTML here.
-  whoEl.textContent = (meta.idType ? meta.idType + " — " : "") + (meta.uploaderName || meta.uploader);
+  whoEl.textContent = (meta.idType ? meta.idType + " — " : "") + subjectDisplayNameOf(meta);
   metaEl.appendChild(whoEl);
 
   const whenEl = document.createElement("div");
@@ -692,10 +829,14 @@ function buildFileCard(meta) {
 
   card.appendChild(metaEl);
 
-  // Delete is only ever shown for the current person's own documents.
-  // This is a convenience — the backend enforces ownership independently
+  // Delete is shown for the document's own uploader, or — for a
+  // dependent's document — any of her current guardians (co-guardians
+  // can manage each other's uploads for the same dependent). This is a
+  // convenience only; the backend enforces the same rule independently
   // and will refuse the request even if this check were somehow bypassed.
-  if (meta.uploader === currentUser.email) {
+  const canManage = meta.uploader === currentUser.email ||
+    (meta.subjectName && myDependentNames.has(meta.subjectName));
+  if (canManage) {
     const menuWrap = document.createElement("div");
     menuWrap.className = "file-menu";
 
@@ -958,6 +1099,7 @@ function buildFileCard(meta) {
       );
       showScreen("screenVault");
       loadFileList();
+      loadDependents();
       return;
     } catch {
       clearPersistedVaultKey(); // fall through to the passphrase screen below
