@@ -2,9 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#12181f">
 <title>Kutumb Vault</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.json">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -48,7 +51,7 @@
            data-shape="pill"
            data-text="signin_with">
       </div>
-      <p id="signInStatus" class="status"></p>
+      <p id="signInStatus" class="status" aria-live="polite"></p>
     </div>
   </section>
 
@@ -62,7 +65,7 @@
         <button type="submit" class="primary-btn">Unlock vault</button>
       </form>
       <p class="muted small">Your browser may offer to save this passphrase for faster unlocking next time. Since it's shared by the whole family, saving it will sync to your other signed-in devices too.</p>
-      <p id="passphraseStatus" class="status"></p>
+      <p id="passphraseStatus" class="status" aria-live="polite"></p>
     </div>
   </section>
 
@@ -90,7 +93,7 @@
       </select>
     </div>
     <div id="fileList" class="file-list"></div>
-    <p id="listStatus" class="status"></p>
+    <p id="listStatus" class="status" aria-live="polite"></p>
   </section>
 
   <!-- SCREEN 4: Upload (separate page, reached via the dashboard button) -->
@@ -113,7 +116,7 @@
         <span class="muted small">Encrypted on this device before it ever leaves</span>
       </label>
       <input type="file" id="fileInput" accept="image/*,application/pdf" class="visually-hidden">
-      <p id="uploadStatus" class="status"></p>
+      <p id="uploadStatus" class="status" aria-live="polite"></p>
     </div>
   </section>
 

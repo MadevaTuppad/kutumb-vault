@@ -22,22 +22,31 @@ body{
   font-family:var(--font-body);
   line-height:1.6;
   -webkit-font-smoothing:antialiased;
+  -webkit-tap-highlight-color:transparent; /* replaced by explicit :active states below */
+  overscroll-behavior-y:contain; /* avoid accidental pull-to-refresh while scrolling the file list */
 }
 
-.wrap{max-width:640px;margin:0 auto;padding:0 20px 60px;}
+.wrap{
+  max-width:640px;margin:0 auto;
+  padding-left:max(20px, env(safe-area-inset-left));
+  padding-right:max(20px, env(safe-area-inset-right));
+  padding-bottom:calc(60px + env(safe-area-inset-bottom));
+}
 
 .topbar{
   display:flex;justify-content:space-between;align-items:center;
-  padding:20px 0;border-bottom:1px solid var(--line);margin-bottom:28px;
+  padding:calc(20px + env(safe-area-inset-top)) 0 20px;
+  border-bottom:1px solid var(--line);margin-bottom:28px;
+  position:sticky;top:0;background:var(--bg);z-index:10; /* below .file-menu-dropdown's z-index:20 */
 }
 .brand{display:flex;align-items:center;gap:8px;font-family:var(--font-head);font-size:18px;color:var(--text);}
 .brand .mark{color:var(--brass);}
 .user-badge{display:flex;align-items:center;gap:14px;font-size:14px;color:var(--text-muted);}
 .link-btn{
   background:none;border:none;color:var(--text-muted);font-family:var(--font-body);
-  font-size:13px;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:3px;
+  font-size:13px;cursor:pointer;padding:8px 4px;text-decoration:underline;text-underline-offset:3px;
 }
-.link-btn:hover{color:var(--text);}
+.link-btn:hover, .link-btn:active{color:var(--text);}
 
 .hidden{display:none !important;}
 .visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);}
@@ -66,7 +75,7 @@ input[type="password"], input[type="text"], select{
   border-radius:8px;
   padding:12px 14px;
   color:var(--text);
-  font-size:15px;
+  font-size:16px; /* below 16px, iOS Safari auto-zooms the page on focus */
   font-family:var(--font-body);
   width:100%;
   margin-bottom:14px;
@@ -85,12 +94,25 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
   font-family:var(--font-body);
   cursor:pointer;
 }
-.primary-btn:hover{background:#dcb230;}
+.primary-btn:hover, .primary-btn:active{background:#dcb230;}
 .primary-btn:disabled{opacity:0.5;cursor:not-allowed;}
 
 .status{font-size:13px;margin-top:14px;min-height:18px;color:var(--text-muted);}
 .status.error{color:var(--danger);}
 .status.success{color:var(--success);}
+
+.spinner{
+  display:inline-block;width:13px;height:13px;
+  border:2px solid rgba(237,232,222,.25);
+  border-top-color:var(--brass);
+  border-radius:50%;
+  vertical-align:-2px;margin-right:7px;
+  animation:spin .7s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg);}}
+@media (prefers-reduced-motion:reduce){
+  .spinner{animation:none;}
+}
 
 .upload-panel{margin-bottom:36px;}
 .upload-drop{
@@ -102,7 +124,7 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
   color:var(--text);
   transition:border-color .15s;
 }
-.upload-drop:hover{border-color:var(--brass-dim);}
+.upload-drop:hover, .upload-drop:active{border-color:var(--brass-dim);}
 .upload-drop svg{color:var(--brass);}
 
 .section-title{
@@ -113,6 +135,24 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 .upload-cta{width:100%;margin-bottom:24px;}
 .back-btn{display:inline-block;margin-bottom:18px;font-size:14px;}
 
+/* On phone-width screens, the upload button becomes a thumb-reachable
+   floating action button instead of sitting at the top of the page
+   (matches this app's own .wrap breakpoint). Desktop/tablet layout
+   above 640px is untouched — same element, same listener, no risk of
+   duplicate buttons. */
+@media (max-width:640px){
+  .upload-cta{
+    position:fixed;
+    right:max(20px, env(safe-area-inset-right));
+    bottom:calc(20px + env(safe-area-inset-bottom));
+    width:auto;
+    margin-bottom:0;
+    box-shadow:0 6px 20px rgba(0,0,0,.4);
+    z-index:15; /* below .file-menu-dropdown (20), above regular content */
+  }
+  #screenVault{padding-bottom:76px;} /* keeps the last file card from sitting under the fixed button */
+}
+
 .tab-row{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid var(--line);}
 .tab-btn{
   background:none;border:none;color:var(--text-muted);
@@ -121,6 +161,7 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
   margin-bottom:-1px;
 }
 .tab-btn.active{color:var(--brass);border-bottom-color:var(--brass);}
+.tab-btn:active{color:var(--brass);}
 
 .filter-row{margin-bottom:14px;display:flex;gap:10px;}
 .filter-row select{margin-bottom:0;flex:1;min-width:0;}
@@ -166,14 +207,16 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
   background:var(--panel-2);border:1px solid var(--line);border-radius:6px;
   padding:8px;color:var(--text);cursor:pointer;
 }
-.icon-btn:hover{border-color:var(--brass-dim);}
+.icon-btn:hover, .icon-btn:active{border-color:var(--brass-dim);}
 
 .file-menu{position:relative;flex-shrink:0;}
 .file-menu-btn{
   background:none;border:none;color:var(--text-muted);
-  font-size:18px;line-height:1;padding:6px 10px;border-radius:6px;cursor:pointer;
+  font-size:18px;line-height:1;padding:13px 14px;border-radius:6px;cursor:pointer;
+  /* ~44px tap target — this button guards a destructive action (Delete),
+     so it gets extra room rather than the tighter padding used elsewhere. */
 }
-.file-menu-btn:hover{background:var(--panel-2);color:var(--text);}
+.file-menu-btn:hover, .file-menu-btn:active{background:var(--panel-2);color:var(--text);}
 .file-menu-dropdown{
   display:none;
   position:absolute;top:100%;right:0;margin-top:4px;
@@ -187,7 +230,7 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
   background:none;border:none;color:var(--danger);
   padding:10px 14px;font-size:14px;cursor:pointer;font-family:var(--font-body);
 }
-.file-menu-item:hover{background:var(--panel);}
+.file-menu-item:hover, .file-menu-item:active{background:var(--panel);}
 .file-menu-item:disabled{opacity:.5;cursor:not-allowed;}
 
 /* Below ~480px, thumb+name+3 buttons no longer fit on one line without

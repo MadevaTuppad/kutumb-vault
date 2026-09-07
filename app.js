@@ -41,6 +41,37 @@ function setStatus(el, msg, kind) {
   el.textContent = msg || "";
   el.className = "status" + (kind ? " " + kind : "");
 }
+// Same as setStatus, but prepends a small spinner — used for transient
+// "in progress" messages (checking access, unlocking, loading) so it's
+// visually obvious something is happening, not just a text change that's
+// easy to miss.
+function setLoadingStatus(el, msg) {
+  el.textContent = "";
+  el.className = "status";
+  const spinner = document.createElement("span");
+  spinner.className = "spinner";
+  el.appendChild(spinner);
+  el.appendChild(document.createTextNode(msg));
+}
+// Swaps a button into a disabled, spinner+label loading state, and back.
+// Used for View/Download/Share/Unlock, which previously gave zero
+// feedback between tap and the action completing.
+function setButtonLoading(btn, loadingText) {
+  if (btn.dataset.originalText === undefined) btn.dataset.originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "";
+  const spinner = document.createElement("span");
+  spinner.className = "spinner";
+  btn.appendChild(spinner);
+  btn.appendChild(document.createTextNode(loadingText));
+}
+function clearButtonLoading(btn) {
+  btn.disabled = false;
+  if (btn.dataset.originalText !== undefined) {
+    btn.textContent = btn.dataset.originalText;
+    delete btn.dataset.originalText;
+  }
+}
 function showScreen(id) {
   ["screenSignIn", "screenPassphrase", "screenVault", "screenUpload"].forEach(s => {
     document.getElementById(s).classList.toggle("hidden", s !== id);
@@ -120,7 +151,7 @@ async function callBackend(action, payload) {
 function handleCredentialResponse(response) {
   const statusEl = document.getElementById("signInStatus");
   idToken = response.credential;
-  setStatus(statusEl, "Checking access…");
+  setLoadingStatus(statusEl, "Checking access…");
 
   callBackend("checkAccess", { idToken })
     .then(res => {
@@ -186,9 +217,17 @@ async function verifySessionOnResume() {
   }
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") verifySessionOnResume();
+  if (document.visibilityState === "visible") onAppResume();
 });
-window.addEventListener("pageshow", verifySessionOnResume);
+window.addEventListener("pageshow", onAppResume);
+
+function onAppResume() {
+  verifySessionOnResume();
+  // Self-heal a stuck "couldn't load documents" error automatically on
+  // the next natural resume, rather than requiring the manual Retry link
+  // — only meaningful once the vault is actually unlocked.
+  if (fileListLoadFailed && vaultKey) loadFileList();
+}
 
 document.getElementById("lockBtn").addEventListener("click", () => {
   vaultKey = null; // drop the key from memory; passphrase must be re-entered
@@ -220,15 +259,18 @@ async function deriveKeyFromPassphrase(passphrase) {
 document.getElementById("passphraseForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const statusEl = document.getElementById("passphraseStatus");
+  const submitBtn = e.target.querySelector('button[type="submit"]');
   const passphrase = document.getElementById("passphraseInput").value;
   document.getElementById("passphraseInput").value = "";
-  setStatus(statusEl, "Unlocking…");
+  setLoadingStatus(statusEl, "Unlocking…");
+  setButtonLoading(submitBtn, "Unlocking…");
 
   let candidateKey;
   try {
     candidateKey = await deriveKeyFromPassphrase(passphrase);
   } catch {
     setStatus(statusEl, "Couldn't derive a key from that passphrase.", "error");
+    clearButtonLoading(submitBtn);
     return;
   }
 
@@ -240,6 +282,7 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
     // generic one — this is a network/backend failure, not a bad
     // passphrase, and the two should never look the same to the user.
     setStatus(statusEl, err.message || "Couldn't verify the passphrase right now. Try again.", "error");
+    clearButtonLoading(submitBtn);
     return;
   }
 
@@ -255,12 +298,14 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
       );
     } catch {
       setStatus(statusEl, "That passphrase doesn't look right — try again.", "error");
+      clearButtonLoading(submitBtn);
       return;
     }
   } else if (!checkRes.ok) {
     // Couldn't reach the check at all — fail safe by refusing to
     // proceed rather than silently skipping verification.
     setStatus(statusEl, "Couldn't verify the passphrase right now. Try again.", "error");
+    clearButtonLoading(submitBtn);
     return;
   }
   // else: no canary configured yet — proceed unverified (nothing to
@@ -268,6 +313,7 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
 
   vaultKey = candidateKey;
   setStatus(statusEl, "");
+  clearButtonLoading(submitBtn);
   showScreen("screenVault");
   loadFileList();
 });
@@ -327,11 +373,11 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
   }
 
   inputEl.disabled = true;
-  setStatus(statusEl, "Encrypting on this device…");
+  setLoadingStatus(statusEl, "Encrypting on this device…");
   try {
     const arrayBuffer = await file.arrayBuffer();
     const { ciphertext, iv } = await encryptBytes(new Uint8Array(arrayBuffer));
-    setStatus(statusEl, "Uploading encrypted file…");
+    setLoadingStatus(statusEl, "Uploading encrypted file…");
     const res = await callBackend("uploadFile", {
       idToken,
       ciphertextBase64: bytesToBase64(ciphertext),
@@ -359,6 +405,7 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
    List + decrypt-on-demand
    ============================================================ */
 let allFiles = [];
+let fileListLoadFailed = false; // lets a resumed session auto-retry instead of leaving a stale error forever
 let activeTab = "mine"; // "mine" | "family"
 let memberFilter = ""; // uploader email, "" = all
 
@@ -422,19 +469,38 @@ function populateMemberFilter() {
 
 async function loadFileList() {
   const listStatus = document.getElementById("listStatus");
-  setStatus(listStatus, "Loading…");
+  setLoadingStatus(listStatus, "Loading…");
   try {
     const res = await callBackend("listFiles", { idToken });
     if (!res.ok) {
-      setStatus(listStatus, "Couldn't load documents.", "error");
+      showListLoadError(listStatus, "Couldn't load documents.");
       return;
     }
+    fileListLoadFailed = false;
     allFiles = res.files;
     populateMemberFilter();
     renderFileList();
-  } catch {
-    setStatus(listStatus, "Couldn't reach the vault backend.", "error");
+  } catch (err) {
+    showListLoadError(listStatus, err.message || "Couldn't reach the vault backend.");
   }
+}
+
+// Shows a load failure with a "Retry" link, and remembers the failure so
+// it can be retried automatically the next time the app becomes visible
+// again — without this, the message just sits there forever, since
+// nothing else ever touches listStatus unless another load happens to
+// succeed on its own.
+function showListLoadError(el, msg) {
+  fileListLoadFailed = true;
+  el.textContent = "";
+  el.className = "status error";
+  el.appendChild(document.createTextNode(msg + " "));
+  const retryBtn = document.createElement("button");
+  retryBtn.type = "button";
+  retryBtn.className = "link-btn";
+  retryBtn.textContent = "Retry";
+  retryBtn.addEventListener("click", () => loadFileList());
+  el.appendChild(retryBtn);
 }
 
 function renderFileList() {
@@ -663,6 +729,7 @@ function buildFileCard(meta) {
     // synchronously from the click — not after an awaited decrypt. So we
     // open a blank tab right away and fill in its location once ready.
     const tab = isIOS() ? window.open("", "_blank") : null;
+    setButtonLoading(viewBtn, "Opening…");
     try {
       await ensureDecrypted();
       if (tab) {
@@ -673,6 +740,8 @@ function buildFileCard(meta) {
     } catch {
       if (tab) tab.close();
       alert("Couldn't decrypt this file — check the passphrase.");
+    } finally {
+      clearButtonLoading(viewBtn);
     }
   });
 
@@ -685,6 +754,7 @@ function buildFileCard(meta) {
     // Android Chrome honors `download` correctly, so it keeps the
     // straightforward anchor-click approach.
     const tab = isIOS() ? window.open("", "_blank") : null;
+    setButtonLoading(downloadBtn, "Downloading…");
     try {
       await ensureDecrypted();
       const ext = extFromMimetype(meta.mimetype);
@@ -701,10 +771,13 @@ function buildFileCard(meta) {
     } catch {
       if (tab) tab.close();
       alert("Couldn't decrypt this file — check the passphrase.");
+    } finally {
+      clearButtonLoading(downloadBtn);
     }
   });
 
   shareBtn.addEventListener("click", async () => {
+    setButtonLoading(shareBtn, "Preparing…");
     try {
       const blob = await ensureDecrypted();
       const ext = extFromMimetype(meta.mimetype);
@@ -717,8 +790,14 @@ function buildFileCard(meta) {
         a.download = `id-document.${ext}`;
         a.click();
       }
-    } catch {
+    } catch (err) {
+      if (err && err.name === "AbortError") {
+        // Person just canceled the native share sheet — not a real error.
+        return;
+      }
       alert("Couldn't decrypt this file — check the passphrase.");
+    } finally {
+      clearButtonLoading(shareBtn);
     }
   });
 
