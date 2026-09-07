@@ -350,7 +350,7 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
   }
   // else: no canary configured yet — proceed unverified (nothing to
   // check against; see generate-passphrase-check.html to set one up).
-  log("Passphrase check succeeded — unlocking vault.");
+  console.log("Passphrase check succeeded — unlocking vault.");
   vaultKey = candidateKey;
   await persistVaultKey();
   setStatus(statusEl, "");
