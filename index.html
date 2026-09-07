@@ -84,12 +84,23 @@
       </select>
       <select id="filterSelect">
         <option value="">All document types</option>
-        <option value="Aadhaar">Aadhaar</option>
-        <option value="PAN">PAN</option>
-        <option value="Passport">Passport</option>
-        <option value="Driving Licence">Driving Licence</option>
-        <option value="Voter ID">Voter ID</option>
-        <option value="Other">Other</option>
+        <optgroup label="Official IDs">
+          <option value="Aadhaar">Aadhaar</option>
+          <option value="PAN">PAN</option>
+          <option value="Passport">Passport</option>
+          <option value="Driving Licence">Driving Licence</option>
+          <option value="Voter ID">Voter ID</option>
+        </optgroup>
+        <optgroup label="Other IDs">
+          <option value="Passport-size Photo">Passport-size Photo</option>
+          <option value="Gas Passbook">Gas Passbook</option>
+          <option value="Ration Card">Ration Card</option>
+          <option value="Birth Certificate">Birth Certificate</option>
+          <option value="Bank Passbook">Bank Passbook</option>
+          <option value="Insurance Policy">Insurance Policy</option>
+          <option value="Property Documents">Property Documents</option>
+          <option value="Other">Other</option>
+        </optgroup>
       </select>
     </div>
     <div id="fileList" class="file-list"></div>
@@ -100,16 +111,13 @@
   <section id="screenUpload" class="screen hidden">
     <button id="backToVaultBtn" class="link-btn back-btn">&larr; Back to documents</button>
     <div class="upload-panel">
-      <label for="idTypeSelect" class="muted small" style="display:block;margin-bottom:6px;">Document type</label>
-      <select id="idTypeSelect" required>
-        <option value="" disabled selected>Select ID type</option>
-        <option value="Aadhaar">Aadhaar</option>
-        <option value="PAN">PAN</option>
-        <option value="Passport">Passport</option>
-        <option value="Driving Licence">Driving Licence</option>
-        <option value="Voter ID">Voter ID</option>
-        <option value="Other">Other</option>
-      </select>
+      <label class="muted small" style="display:block;margin-bottom:6px;">Document category</label>
+      <div class="tab-row" id="idCategoryTabs" role="tablist">
+        <button type="button" id="idCatOfficial" class="tab-btn active" role="tab" aria-selected="true" data-category="official">Official IDs</button>
+        <button type="button" id="idCatOther" class="tab-btn" role="tab" aria-selected="false" data-category="other">Other IDs</button>
+      </div>
+      <label for="idTypeSelect" class="muted small" style="display:block;margin:14px 0 6px;">Document type</label>
+      <select id="idTypeSelect" required></select>
       <label for="fileInput" class="upload-drop">
         <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M12 16V4M12 4L7 9M12 4l5 5M5 20h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span>Take a photo, or choose an image or PDF</span>

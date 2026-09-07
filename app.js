@@ -386,6 +386,36 @@ async function decryptWithKey(key, ciphertextBytes, ivBytes) {
 
 const MAX_FILE_BYTES = 15 * 1024 * 1024; // 15MB — comfortably under Apps Script's request-size limits once base64-encoded
 
+// Must stay in sync with ALLOWED_ID_TYPES in backend.gs — the backend is
+// the real enforcement point, this only controls what the dropdown offers.
+const ID_TYPE_CATEGORIES = {
+  official: ["Aadhaar", "PAN", "Passport", "Driving Licence", "Voter ID"],
+  other: ["Passport-size Photo", "Gas Passbook", "Ration Card", "Birth Certificate",
+          "Bank Passbook", "Insurance Policy", "Property Documents", "Other"],
+};
+
+function populateIdTypeOptions(category) {
+  const select = document.getElementById("idTypeSelect");
+  select.innerHTML = '<option value="" disabled selected>Select ID type</option>';
+  for (const type of ID_TYPE_CATEGORIES[category] || []) {
+    const opt = document.createElement("option");
+    opt.value = type;
+    opt.textContent = type;
+    select.appendChild(opt);
+  }
+}
+
+document.querySelectorAll("#idCategoryTabs .tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#idCategoryTabs .tab-btn").forEach(b => {
+      b.classList.toggle("active", b === btn);
+      b.setAttribute("aria-selected", b === btn ? "true" : "false");
+    });
+    populateIdTypeOptions(btn.dataset.category);
+  });
+});
+populateIdTypeOptions("official"); // initial state matches the tab marked active in the HTML
+
 document.getElementById("openUploadBtn").addEventListener("click", () => {
   showScreen("screenUpload");
 });
