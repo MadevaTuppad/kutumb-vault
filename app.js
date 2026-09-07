@@ -437,8 +437,10 @@ async function loadDependents() {
       dependents = res.dependents;
       myDependentNames = new Set(dependents.map(d => d.name));
       populateSubjectSelect();
+      log("Loaded dependents:", dependents.map(d => d.name).join(", "));
     }
   } catch (err) {
+    log("Couldn't load dependents:", err);
     // Non-fatal — the dropdown just won't offer any dependents yet;
     // this is set up entirely by the admin, directly in the sheet.
   }
