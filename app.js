@@ -73,11 +73,28 @@ function extFromMimetype(mimetype) {
    Apps don't handle. The server still parses the body as JSON.
    ============================================================ */
 async function callBackend(action, payload) {
-  const res = await fetch(APPS_SCRIPT_URL, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify({ action, ...payload }),
-  });
+  const controller = new AbortController();
+  // If nothing comes back in 15s, something (a network issue, a blocked
+  // request, an extension silently intercepting it) is preventing this
+  // from ever settling on its own — fail loudly instead of leaving the
+  // UI stuck on a loading message forever.
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  let res;
+  try {
+    res = await fetch(APPS_SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action, ...payload }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error("Request timed out — check your connection (or try disabling browser extensions) and try again.");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!res.ok) throw new Error("Network error: " + res.status);
   return res.json();
 }
@@ -102,7 +119,7 @@ function handleCredentialResponse(response) {
       document.getElementById("userBadge").classList.remove("hidden");
       showScreen("screenPassphrase");
     })
-    .catch(() => setStatus(statusEl, "Couldn't reach the vault backend. Try again.", "error"));
+    .catch(err => setStatus(statusEl, err.message || "Couldn't reach the vault backend. Try again.", "error"));
 }
 
 /** Clears all auth/session state. Shared by explicit sign-out and by
@@ -112,6 +129,7 @@ function resetAuthState() {
   currentUser = null;
   vaultKey = null;
   document.getElementById("userBadge").classList.add("hidden");
+  setStatus(document.getElementById("signInStatus"), ""); // clear any leftover "Checking access..." / error text
   // Without this, Google Identity Services silently re-selects the same
   // account on the next "Sign in with Google" attempt instead of showing
   // the account picker.
