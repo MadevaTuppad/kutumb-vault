@@ -121,8 +121,21 @@ function resetAuthState() {
 }
 
 document.getElementById("signOutBtn").addEventListener("click", () => {
+  // Capture before resetAuthState() clears it — revoke needs the email.
+  const emailToRevoke = currentUser ? currentUser.email : null;
   resetAuthState();
   showScreen("screenSignIn");
+  // disableAutoSelect() (above) only stops One Tap from auto-picking an
+  // account. It does NOT stop the "Sign in with Google" button itself
+  // from rendering a personalized "Continue as <name>" chip — that chip
+  // shows up whenever the browser still has an active Google session
+  // AND this app still has consent from that account. revoke() clears
+  // that consent, so the button falls back to a plain, generic
+  // "Sign in with Google" on the next visit. The person will need to
+  // grant consent again next time they sign in — that's expected.
+  if (emailToRevoke && window.google && google.accounts && google.accounts.id) {
+    google.accounts.id.revoke(emailToRevoke, () => {});
+  }
 });
 
 /* ------------------------------------------------------------
