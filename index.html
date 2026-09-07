@@ -58,9 +58,10 @@
       <h1>Enter the family passphrase</h1>
       <p class="muted">This unlocks the encryption key on this device only. It is never sent anywhere.</p>
       <form id="passphraseForm">
-        <input type="password" id="passphraseInput" placeholder="Family passphrase" autocomplete="off" required>
+        <input type="password" id="passphraseInput" placeholder="Family passphrase" autocomplete="current-password" required>
         <button type="submit" class="primary-btn">Unlock vault</button>
       </form>
+      <p class="muted small">Your browser may offer to save this passphrase for faster unlocking next time. Since it's shared by the whole family, saving it will sync to your other signed-in devices too.</p>
       <p id="passphraseStatus" class="status"></p>
     </div>
   </section>

@@ -168,6 +168,28 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 }
 .icon-btn:hover{border-color:var(--brass-dim);}
 
+.file-menu{position:relative;flex-shrink:0;}
+.file-menu-btn{
+  background:none;border:none;color:var(--text-muted);
+  font-size:18px;line-height:1;padding:6px 10px;border-radius:6px;cursor:pointer;
+}
+.file-menu-btn:hover{background:var(--panel-2);color:var(--text);}
+.file-menu-dropdown{
+  display:none;
+  position:absolute;top:100%;right:0;margin-top:4px;
+  background:var(--panel-2);border:1px solid var(--line);border-radius:8px;
+  box-shadow:0 6px 16px rgba(0,0,0,.35);
+  min-width:130px;overflow:hidden;z-index:20;
+}
+.file-menu-dropdown.open{display:block;}
+.file-menu-item{
+  display:block;width:100%;text-align:left;
+  background:none;border:none;color:var(--danger);
+  padding:10px 14px;font-size:14px;cursor:pointer;font-family:var(--font-body);
+}
+.file-menu-item:hover{background:var(--panel);}
+.file-menu-item:disabled{opacity:.5;cursor:not-allowed;}
+
 /* Below ~480px, thumb+name+3 buttons no longer fit on one line without
    the buttons overlapping the text. Drop the action row onto its own
    line instead of letting it collide with the name/date. */

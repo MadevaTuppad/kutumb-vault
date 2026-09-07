@@ -72,13 +72,23 @@ function extFromMimetype(mimetype) {
    request" and skips a CORS preflight, which Apps Script Web
    Apps don't handle. The server still parses the body as JSON.
    ============================================================ */
+// uploadFile/getFile can carry up to ~15MB of file data (~20MB once
+// base64-encoded), which can genuinely take longer than a few seconds on
+// a slow mobile connection. Lightweight calls (checkAccess, listFiles,
+// getPassphraseCheck) have no reason to ever take that long, so they get
+// a much tighter timeout to fail fast instead of leaving the UI stuck.
+const LARGE_PAYLOAD_ACTIONS = new Set(["uploadFile", "getFile"]);
+const DEFAULT_TIMEOUT_MS = 15000;
+const LARGE_PAYLOAD_TIMEOUT_MS = 60000;
+
 async function callBackend(action, payload) {
+  const timeoutMs = LARGE_PAYLOAD_ACTIONS.has(action) ? LARGE_PAYLOAD_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
-  // If nothing comes back in 15s, something (a network issue, a blocked
+  // If nothing comes back in time, something (a network issue, a blocked
   // request, an extension silently intercepting it) is preventing this
   // from ever settling on its own — fail loudly instead of leaving the
   // UI stuck on a loading message forever.
-  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   let res;
   try {
     res = await fetch(APPS_SCRIPT_URL, {
@@ -89,6 +99,11 @@ async function callBackend(action, payload) {
     });
   } catch (err) {
     if (err.name === "AbortError") {
+      // Note: aborting here only stops the client from waiting — Apps
+      // Script may still finish executing server-side (e.g. an upload
+      // can still land even though this call reports failure). If a
+      // person retries after an upload timeout, a duplicate entry is
+      // possible; not fixable from the client side alone.
       throw new Error("Request timed out — check your connection (or try disabling browser extensions) and try again.");
     }
     throw err;
@@ -208,40 +223,53 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
   const passphrase = document.getElementById("passphraseInput").value;
   document.getElementById("passphraseInput").value = "";
   setStatus(statusEl, "Unlocking…");
+
+  let candidateKey;
   try {
-    const candidateKey = await deriveKeyFromPassphrase(passphrase);
-    const checkRes = await callBackend("getPassphraseCheck", { idToken });
-
-    if (checkRes.ok && checkRes.exists) {
-      // A canary is configured — this is the real, reliable check.
-      // AES-GCM's authentication tag fails deterministically on any
-      // wrong key, so this never gives a false positive or negative.
-      try {
-        await decryptWithKey(
-          candidateKey,
-          base64ToBytes(checkRes.ciphertextBase64),
-          base64ToBytes(checkRes.ivBase64)
-        );
-      } catch {
-        setStatus(statusEl, "That passphrase doesn't look right — try again.", "error");
-        return;
-      }
-    } else if (!checkRes.ok) {
-      // Couldn't reach the check at all — fail safe by refusing to
-      // proceed rather than silently skipping verification.
-      setStatus(statusEl, "Couldn't verify the passphrase right now. Try again.", "error");
-      return;
-    }
-    // else: no canary configured yet — proceed unverified (nothing to
-    // check against; see generate-passphrase-check.html to set one up).
-
-    vaultKey = candidateKey;
-    setStatus(statusEl, "");
-    showScreen("screenVault");
-    loadFileList();
+    candidateKey = await deriveKeyFromPassphrase(passphrase);
   } catch {
     setStatus(statusEl, "Couldn't derive a key from that passphrase.", "error");
+    return;
   }
+
+  let checkRes;
+  try {
+    checkRes = await callBackend("getPassphraseCheck", { idToken });
+  } catch (err) {
+    // Surface the real reason (e.g. the timeout message) instead of a
+    // generic one — this is a network/backend failure, not a bad
+    // passphrase, and the two should never look the same to the user.
+    setStatus(statusEl, err.message || "Couldn't verify the passphrase right now. Try again.", "error");
+    return;
+  }
+
+  if (checkRes.ok && checkRes.exists) {
+    // A canary is configured — this is the real, reliable check.
+    // AES-GCM's authentication tag fails deterministically on any
+    // wrong key, so this never gives a false positive or negative.
+    try {
+      await decryptWithKey(
+        candidateKey,
+        base64ToBytes(checkRes.ciphertextBase64),
+        base64ToBytes(checkRes.ivBase64)
+      );
+    } catch {
+      setStatus(statusEl, "That passphrase doesn't look right — try again.", "error");
+      return;
+    }
+  } else if (!checkRes.ok) {
+    // Couldn't reach the check at all — fail safe by refusing to
+    // proceed rather than silently skipping verification.
+    setStatus(statusEl, "Couldn't verify the passphrase right now. Try again.", "error");
+    return;
+  }
+  // else: no canary configured yet — proceed unverified (nothing to
+  // check against; see generate-passphrase-check.html to set one up).
+
+  vaultKey = candidateKey;
+  setStatus(statusEl, "");
+  showScreen("screenVault");
+  loadFileList();
 });
 
 /* ============================================================
@@ -333,6 +361,14 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
 let allFiles = [];
 let activeTab = "mine"; // "mine" | "family"
 let memberFilter = ""; // uploader email, "" = all
+
+// Closes any open per-card "⋯" menu — called both when a click lands
+// outside every menu, and before opening a different one (so at most
+// one menu is ever open at a time).
+function closeAllFileMenus() {
+  document.querySelectorAll(".file-menu-dropdown.open").forEach(d => d.classList.remove("open"));
+}
+document.addEventListener("click", closeAllFileMenus);
 
 /* ------------------------------------------------------------
    Thumbnails auto-decrypt as their card scrolls into view (the
@@ -487,6 +523,63 @@ function buildFileCard(meta) {
   metaEl.appendChild(whenEl);
 
   card.appendChild(metaEl);
+
+  // Delete is only ever shown for the current person's own documents.
+  // This is a convenience — the backend enforces ownership independently
+  // and will refuse the request even if this check were somehow bypassed.
+  if (meta.uploader === currentUser.email) {
+    const menuWrap = document.createElement("div");
+    menuWrap.className = "file-menu";
+
+    const menuBtn = document.createElement("button");
+    menuBtn.className = "file-menu-btn";
+    menuBtn.textContent = "⋯";
+    menuBtn.setAttribute("aria-label", "More options");
+    menuWrap.appendChild(menuBtn);
+
+    const dropdown = document.createElement("div");
+    dropdown.className = "file-menu-dropdown";
+    const deleteItem = document.createElement("button");
+    deleteItem.className = "file-menu-item";
+    deleteItem.textContent = "Delete";
+    dropdown.appendChild(deleteItem);
+    menuWrap.appendChild(dropdown);
+
+    menuBtn.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't let the global listener immediately close this
+      const wasOpen = dropdown.classList.contains("open");
+      closeAllFileMenus();
+      if (!wasOpen) dropdown.classList.add("open");
+    });
+
+    deleteItem.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      dropdown.classList.remove("open");
+      const label = meta.idType || "this document";
+      if (!confirm(`Delete this ${label}? This can't be undone.`)) return;
+
+      deleteItem.disabled = true;
+      deleteItem.textContent = "Deleting…";
+      try {
+        const res = await callBackend("deleteFile", { idToken, driveFileId: meta.driveFileId });
+        if (!res.ok) {
+          alert("Couldn't delete: " + (res.error || "unknown error"));
+          deleteItem.disabled = false;
+          deleteItem.textContent = "Delete";
+          return;
+        }
+        allFiles = allFiles.filter(f => f.driveFileId !== meta.driveFileId);
+        populateMemberFilter();
+        renderFileList(); // also runs the usual cardCleanups for every discarded card, including this one
+      } catch (err) {
+        alert(err.message || "Couldn't delete this document.");
+        deleteItem.disabled = false;
+        deleteItem.textContent = "Delete";
+      }
+    });
+
+    card.appendChild(menuWrap);
+  }
 
   const actions = document.createElement("div");
   actions.className = "file-actions";
