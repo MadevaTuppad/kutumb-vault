@@ -145,8 +145,8 @@ function extFromMimetype(mimetype) {
 // getPassphraseCheck) have no reason to ever take that long, so they get
 // a much tighter timeout to fail fast instead of leaving the UI stuck.
 const LARGE_PAYLOAD_ACTIONS = new Set(["uploadFile", "getFile"]);
-const DEFAULT_TIMEOUT_MS = 15000;
-const LARGE_PAYLOAD_TIMEOUT_MS = 60000;
+const DEFAULT_TIMEOUT_MS = 60000;
+const LARGE_PAYLOAD_TIMEOUT_MS = 120000;
 
 async function callBackend(action, payload) {
   const timeoutMs = LARGE_PAYLOAD_ACTIONS.has(action) ? LARGE_PAYLOAD_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
