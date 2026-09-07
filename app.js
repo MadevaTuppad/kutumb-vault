@@ -14,11 +14,47 @@ const PBKDF2_ITERATIONS = 250000;
 const CHECK_PLAINTEXT = "kutumb-vault-check-v1";
 
 /* ============================================================
-   State (kept only in memory — never persisted to disk/storage)
+   State
+   ------------------------------------------------------------
+   idToken/currentUser/vaultKey optionally survive a page refresh via
+   sessionStorage (see persistAuth / restoreSessionOnLoad below) — this
+   is a deliberate convenience trade-off. sessionStorage never touches
+   the network, so it doesn't affect man-in-the-middle exposure, but it IS readable by
+   any JS running in this origin (e.g. an XSS bug) or by anyone with
+   physical access to an unlocked device's DevTools. It's cleared the
+   moment the tab is actually closed (unlike localStorage).
    ============================================================ */
 let idToken = null;
 let currentUser = null; // { email, name }
 let vaultKey = null;    // CryptoKey, only exists after passphrase unlock
+
+/* ------------------------------------------------------------
+   Session persistence (sessionStorage — cleared when the tab closes)
+   ------------------------------------------------------------ */
+const SESSION_AUTH_KEY = "kutumbVaultAuth";  // { idToken, currentUser } — survives Lock vault
+const SESSION_VAULTKEY_KEY = "kutumbVaultKey"; // exported raw AES key, base64 — cleared by Lock vault
+
+function persistAuth() {
+  try {
+    sessionStorage.setItem(SESSION_AUTH_KEY, JSON.stringify({ idToken, currentUser }));
+  } catch (err) {
+    // Non-fatal — worst case, the next refresh just asks to sign in again.
+  }
+}
+function clearPersistedAuth() {
+  try { sessionStorage.removeItem(SESSION_AUTH_KEY); } catch (err) {}
+}
+async function persistVaultKey() {
+  try {
+    const rawKey = await crypto.subtle.exportKey("raw", vaultKey);
+    sessionStorage.setItem(SESSION_VAULTKEY_KEY, bytesToBase64(new Uint8Array(rawKey)));
+  } catch (err) {
+    // Non-fatal — worst case, the next refresh just asks for the passphrase again.
+  }
+}
+function clearPersistedVaultKey() {
+  try { sessionStorage.removeItem(SESSION_VAULTKEY_KEY); } catch (err) {}
+}
 
 /* ============================================================
    Small helpers
@@ -163,6 +199,7 @@ function handleCredentialResponse(response) {
       currentUser = { email: res.email, name: res.name };
       document.getElementById("userName").textContent = res.name;
       document.getElementById("userBadge").classList.remove("hidden");
+      persistAuth();
       showScreen("screenPassphrase");
     })
     .catch(err => setStatus(statusEl, err.message || "Couldn't reach the vault backend. Try again.", "error"));
@@ -174,6 +211,8 @@ function resetAuthState() {
   idToken = null;
   currentUser = null;
   vaultKey = null;
+  clearPersistedAuth();
+  clearPersistedVaultKey();
   document.getElementById("userBadge").classList.add("hidden");
   setStatus(document.getElementById("signInStatus"), ""); // clear any leftover "Checking access..." / error text
   // Without this, Google Identity Services silently re-selects the same
@@ -231,6 +270,7 @@ function onAppResume() {
 
 document.getElementById("lockBtn").addEventListener("click", () => {
   vaultKey = null; // drop the key from memory; passphrase must be re-entered
+  clearPersistedVaultKey(); // otherwise a refresh right after Lock would silently restore it
   showScreen("screenPassphrase");
 });
 
@@ -251,7 +291,7 @@ async function deriveKeyFromPassphrase(passphrase) {
     },
     baseKey,
     { name: "AES-GCM", length: 256 },
-    false,
+    true, // extractable — required so the key can be persisted to sessionStorage (see persistVaultKey)
     ["encrypt", "decrypt"]
   );
 }
@@ -312,6 +352,7 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
   // check against; see generate-passphrase-check.html to set one up).
 
   vaultKey = candidateKey;
+  await persistVaultKey();
   setStatus(statusEl, "");
   clearButtonLoading(submitBtn);
   showScreen("screenVault");
@@ -372,6 +413,25 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
     return;
   }
 
+  // Warn before silently creating a second copy of the same document type.
+  // Matches on ID type + broad media category (image vs PDF) — a JPEG
+  // replacing a PNG of the same ID still counts as "the same document",
+  // but a PDF doesn't collide with an existing image of the same type.
+  const newIsPdf = (file.type || "").toLowerCase().includes("pdf");
+  const existing = allFiles.find(f =>
+    f.uploader === currentUser.email &&
+    f.idType === idType &&
+    ((f.mimetype || "").toLowerCase().includes("pdf")) === newIsPdf
+  );
+  if (existing) {
+    const kindLabel = newIsPdf ? "PDF" : "image";
+    const proceed = confirm(`You already have a ${idType} (${kindLabel}) in the vault. Replace it with this new one?`);
+    if (!proceed) {
+      inputEl.value = "";
+      return;
+    }
+  }
+
   inputEl.disabled = true;
   setLoadingStatus(statusEl, "Encrypting on this device…");
   try {
@@ -389,7 +449,19 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
       setStatus(statusEl, "Upload failed: " + (res.error || "unknown error"), "error");
       return;
     }
-    setStatus(statusEl, "Saved to the vault.", "success");
+
+    if (existing) {
+      // Best-effort cleanup — the new copy is already safely uploaded
+      // either way, so a failure here shouldn't be shown as an error;
+      // the old copy would just remain until deleted manually.
+      try {
+        await callBackend("deleteFile", { idToken, driveFileId: existing.driveFileId });
+      } catch (err) {
+        console.warn("Couldn't remove the replaced document:", err);
+      }
+    }
+
+    setStatus(statusEl, existing ? "Replaced in the vault." : "Saved to the vault.", "success");
     inputEl.value = "";
     idTypeSelect.selectedIndex = 0;
     loadFileList();
@@ -803,3 +875,63 @@ function buildFileCard(meta) {
 
   return card;
 }
+
+/* ============================================================
+   Startup — attempt to restore a persisted session
+   ------------------------------------------------------------
+   Runs once when the script first loads (including on every refresh).
+   The saved idToken is always re-verified against the backend before
+   being trusted — it could have quietly expired since it was saved,
+   and this is also what stops a tampered/stale sessionStorage value
+   from silently granting access.
+   ============================================================ */
+(async function restoreSessionOnLoad() {
+  const savedAuthRaw = sessionStorage.getItem(SESSION_AUTH_KEY);
+  if (!savedAuthRaw) return; // nothing saved — default screenSignIn stays showing
+
+  let savedAuth;
+  try {
+    savedAuth = JSON.parse(savedAuthRaw);
+  } catch {
+    clearPersistedAuth();
+    return;
+  }
+  if (!savedAuth.idToken || !savedAuth.currentUser) {
+    clearPersistedAuth();
+    return;
+  }
+
+  let checkRes;
+  try {
+    checkRes = await callBackend("checkAccess", { idToken: savedAuth.idToken });
+  } catch {
+    // Transient network issue — leave the sign-in screen showing rather
+    // than wiping a possibly-still-valid saved session over a hiccup.
+    return;
+  }
+  if (!checkRes.ok) {
+    clearPersistedAuth();
+    clearPersistedVaultKey();
+    return;
+  }
+
+  idToken = savedAuth.idToken;
+  currentUser = savedAuth.currentUser;
+  document.getElementById("userName").textContent = currentUser.name;
+  document.getElementById("userBadge").classList.remove("hidden");
+
+  const savedKeyBase64 = sessionStorage.getItem(SESSION_VAULTKEY_KEY);
+  if (savedKeyBase64) {
+    try {
+      vaultKey = await crypto.subtle.importKey(
+        "raw", base64ToBytes(savedKeyBase64), { name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]
+      );
+      showScreen("screenVault");
+      loadFileList();
+      return;
+    } catch {
+      clearPersistedVaultKey(); // fall through to the passphrase screen below
+    }
+  }
+  showScreen("screenPassphrase");
+})();
