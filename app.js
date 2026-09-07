@@ -134,7 +134,16 @@ document.getElementById("signOutBtn").addEventListener("click", () => {
   // "Sign in with Google" on the next visit. The person will need to
   // grant consent again next time they sign in — that's expected.
   if (emailToRevoke && window.google && google.accounts && google.accounts.id) {
-    google.accounts.id.revoke(emailToRevoke, () => {});
+    google.accounts.id.revoke(emailToRevoke, (response) => {
+      // Surfaced for debugging only — the UI doesn't depend on this.
+      // response.successful tells us whether Google actually processed
+      // the revoke; response.error carries the reason if it didn't.
+      if (response && response.error) {
+        console.warn("Google consent revoke failed:", response.error);
+      } else {
+        console.log("Google consent revoked for", emailToRevoke);
+      }
+    });
   }
 });
 
