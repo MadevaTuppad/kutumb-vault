@@ -514,6 +514,13 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
     return;
   }
 
+  const fileType = (file.type || "").toLowerCase();
+  if (!fileType.startsWith("image/") && fileType !== "application/pdf") {
+    setStatus(statusEl, "Only images and PDFs are allowed — no videos or other file types.", "error");
+    inputEl.value = "";
+    return;
+  }
+
   if (file.size > MAX_FILE_BYTES) {
     setStatus(statusEl, "That photo is too large (max 15MB). Try again with a smaller image.", "error");
     inputEl.value = "";
@@ -546,6 +553,7 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
   try {
     const arrayBuffer = await file.arrayBuffer();
     const { ciphertext, iv } = await encryptBytes(new Uint8Array(arrayBuffer));
+
     setLoadingStatus(statusEl, "Uploading encrypted file…");
     const res = await callBackend("uploadFile", {
       idToken,
@@ -602,29 +610,7 @@ function closeAllFileMenus() {
 }
 document.addEventListener("click", closeAllFileMenus);
 
-/* ------------------------------------------------------------
-   Thumbnails auto-decrypt as their card scrolls into view (the
-   vault is already unlocked at this point, so this doesn't reveal
-   anything a manual "View" click wouldn't — it just avoids the
-   empty placeholder box until the user taps a button). Lazy via
-   IntersectionObserver so it only loads what's actually visible,
-   not every document at once.
-   ------------------------------------------------------------ */
-const thumbLoaders = new WeakMap(); // thumb element -> load function
 const cardCleanups = new WeakMap(); // card element -> cleanup function, run just before the card is discarded
-const thumbObserver = ("IntersectionObserver" in window)
-  ? new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        const load = thumbLoaders.get(entry.target);
-        if (load) {
-          thumbObserver.unobserve(entry.target);
-          thumbLoaders.delete(entry.target);
-          load();
-        }
-      }
-    }, { rootMargin: "200px" })
-  : null;
 
 // A document either belongs to the account holder who uploaded it, or
 // to a dependent they uploaded it on behalf of. These two helpers give
@@ -758,14 +744,9 @@ function buildFileCard(meta) {
   card.className = "file-card";
 
   const thumb = document.createElement("div");
-  thumb.className = "file-thumb";
+  thumb.className = "file-thumb file-thumb-label";
   const isPdf = (meta.mimetype || "").toLowerCase().includes("pdf");
-  if (isPdf) {
-    thumb.classList.add("file-thumb-pdf");
-    thumb.textContent = "PDF";
-  } else {
-    thumb.classList.add("file-thumb-loading");
-  }
+  thumb.textContent = isPdf ? "PDF" : "IMG";
   card.appendChild(thumb);
 
   const metaEl = document.createElement("div");
@@ -869,7 +850,7 @@ function buildFileCard(meta) {
   card.appendChild(actions);
 
   let decryptedBlob = null; // cached after first decrypt, per session only
-  let decryptedUrl = null;  // one object URL reused by thumbnail/View/Download, revoked on cleanup
+  let decryptedUrl = null;  // one object URL reused by View/Download/Share, revoked on cleanup
   let decryptPromise = null; // in-flight/cached promise — prevents duplicate concurrent decrypts
 
   function ensureDecrypted() {
@@ -883,47 +864,17 @@ function buildFileCard(meta) {
       );
       decryptedBlob = new Blob([plainBytes], { type: meta.mimetype || "image/jpeg" });
       decryptedUrl = URL.createObjectURL(decryptedBlob);
-      if (!isPdf) {
-        thumb.classList.remove("file-thumb-loading");
-        thumb.style.backgroundImage = `url(${decryptedUrl})`;
-        thumb.style.backgroundSize = "cover";
-        thumb.style.backgroundPosition = "center";
-      }
       return decryptedBlob;
     })();
     // Don't permanently cache a failure — let the next call (e.g. a manual
-    // "View" tap after the auto-load silently failed) retry from scratch.
+    // "View" tap after a previous attempt failed) retry from scratch.
     decryptPromise.catch(() => { decryptPromise = null; });
     return decryptPromise;
   }
 
   cardCleanups.set(card, () => {
     if (decryptedUrl) URL.revokeObjectURL(decryptedUrl);
-    if (thumbObserver) {
-      thumbObserver.unobserve(thumb);
-      thumbLoaders.delete(thumb);
-    }
   });
-
-  // Auto-load the thumbnail once this card scrolls into view.
-  if (!isPdf) {
-    const autoLoad = () => {
-      ensureDecrypted().catch(() => {
-        // Wrong passphrase or fetch failure — don't alert for an
-        // automatic background load; just stop showing the spinner
-        // and fall back to a plain placeholder. The user will still
-        // see a clear error if they tap View/Download/Share.
-        thumb.classList.remove("file-thumb-loading");
-        thumb.classList.add("file-thumb-error");
-      });
-    };
-    if (thumbObserver) {
-      thumbLoaders.set(thumb, autoLoad);
-      thumbObserver.observe(thumb);
-    } else {
-      autoLoad(); // no IntersectionObserver support — just load immediately
-    }
-  }
 
   viewBtn.addEventListener("click", async () => {
     // iOS Safari's popup blocker only allows window.open() when called

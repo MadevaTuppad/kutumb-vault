@@ -178,27 +178,12 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
   width:56px;height:56px;border-radius:6px;object-fit:cover;
   background:var(--panel-2);flex-shrink:0;
 }
-.file-thumb-pdf{
+.file-thumb-label{
   display:flex;align-items:center;justify-content:center;
   font-family:var(--font-body);font-size:11px;font-weight:600;
   letter-spacing:.03em;color:var(--brass);
   border:1px solid var(--line);
 }
-.file-thumb-loading{
-  background:linear-gradient(90deg, var(--panel-2) 25%, var(--line) 37%, var(--panel-2) 63%);
-  background-size:400% 100%;
-  animation:thumb-shimmer 1.4s ease-in-out infinite;
-}
-@keyframes thumb-shimmer{
-  0%{background-position:100% 50%;}
-  100%{background-position:0% 50%;}
-}
-.file-thumb-error{
-  display:flex;align-items:center;justify-content:center;
-  font-family:var(--font-body);font-size:10px;font-weight:600;
-  color:var(--text-muted);border:1px solid var(--line);
-}
-.file-thumb-error::after{content:"Tap View";}
 .file-meta{flex:1 1 140px;min-width:0;}
 .file-meta .who{font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .file-meta .when{font-size:12px;color:var(--text-muted);}
@@ -239,10 +224,6 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 @media (max-width:480px){
   .file-actions{flex-basis:100%;justify-content:flex-end;}
   .file-meta .who{white-space:normal;overflow:visible;text-overflow:clip;}
-}
-
-@media (prefers-reduced-motion: reduce){
-  .file-thumb-loading{animation:none;}
 }
 
 @media (prefers-reduced-motion: no-preference){
