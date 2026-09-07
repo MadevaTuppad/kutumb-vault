@@ -350,7 +350,7 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
   }
   // else: no canary configured yet — proceed unverified (nothing to
   // check against; see generate-passphrase-check.html to set one up).
-
+  log("Passphrase check succeeded — unlocking vault.");
   vaultKey = candidateKey;
   await persistVaultKey();
   setStatus(statusEl, "");
@@ -437,10 +437,10 @@ async function loadDependents() {
       dependents = res.dependents;
       myDependentNames = new Set(dependents.map(d => d.name));
       populateSubjectSelect();
-      log("Loaded dependents:", dependents.map(d => d.name).join(", "));
+      console.log("Loaded dependents:", dependents.map(d => d.name).join(", "));
     }
   } catch (err) {
-    log("Couldn't load dependents:", err);
+    console.error("Couldn't load dependents:", err);
     // Non-fatal — the dropdown just won't offer any dependents yet;
     // this is set up entirely by the admin, directly in the sheet.
   }
