@@ -132,6 +132,31 @@ function extFromMimetype(mimetype) {
   return "jpg";
 }
 
+// Fills the tab opened synchronously (to dodge iOS Safari's popup
+// blocker — see isIOS() usage below) with a visible loading message,
+// instead of leaving it truly blank while the file decrypts. A large
+// PDF over a slow connection can take a real, noticeable amount of
+// time here, and a blank white tab looks identical to a broken one.
+function showTabLoading(tab) {
+  if (!tab) return;
+  try {
+    tab.document.write(
+      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+      '<title>Kutumb Vault</title>' +
+      '<style>body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;' +
+      'background:#12181f;color:#8b93a1;font-family:system-ui,sans-serif;font-size:15px;}' +
+      '.s{display:inline-block;width:16px;height:16px;border:2px solid rgba(237,232,222,.25);' +
+      'border-top-color:#c9a227;border-radius:50%;margin-right:8px;animation:sp .7s linear infinite;' +
+      'vertical-align:-3px;}@keyframes sp{to{transform:rotate(360deg);}}</style></head>' +
+      '<body><div><span class="s"></span>Decrypting your document…</div></body></html>'
+    );
+    tab.document.close();
+  } catch (err) {
+    // Non-fatal — worst case it's just blank until navigation happens.
+  }
+}
+
 /* ============================================================
    Backend calls
    NOTE: Content-Type is deliberately "text/plain" (not
@@ -460,51 +485,11 @@ function populateSubjectSelect(selectedName) {
     opt.textContent = dep.name;
     select.appendChild(opt);
   }
-  if (dependents.length > 0) {
-    const manageOpt = document.createElement("option");
-    manageOpt.value = "__manage__";
-    manageOpt.textContent = "Manage family members…";
-    select.appendChild(manageOpt);
-  }
 
   if (previousValue && [...select.options].some(o => o.value === previousValue)) {
     select.value = previousValue;
   }
 }
-
-document.getElementById("subjectSelect").addEventListener("change", async (e) => {
-  const select = e.target;
-  if (select.value !== "__manage__") return;
-
-  select.value = ""; // this option only ever triggers an action, never stays selected
-  // Lightweight text-based removal flow — deliberately no new screen.
-  // Only ever offers MY dependents, since `dependents` already only
-  // contains ones I'm a guardian of. Adding a new dependent is
-  // deliberately admin-only (done directly in the sheet), so there's
-  // no corresponding "add" branch here.
-  const listText = dependents.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
-  const choice = prompt(`Remove which family member?\n${listText}\n\nType the number, or Cancel to keep everyone.`);
-  if (!choice) return;
-  const idx = parseInt(choice, 10) - 1;
-  if (isNaN(idx) || idx < 0 || idx >= dependents.length) {
-    alert("Didn't recognize that number — nothing was removed.");
-    return;
-  }
-  const target = dependents[idx];
-  if (!confirm(`Remove "${target.name}"? Her already-uploaded documents stay in the vault, just tagged as before — this only stops her being offered for new uploads.`)) {
-    return;
-  }
-  try {
-    const res = await callBackend("deleteDependent", { idToken, name: target.name });
-    if (!res.ok) {
-      alert("Couldn't remove her: " + (res.error || "unknown error"));
-      return;
-    }
-    await loadDependents();
-  } catch (err) {
-    alert(err.message || "Couldn't remove that family member.");
-  }
-});
 
 document.getElementById("openUploadBtn").addEventListener("click", () => {
   showScreen("screenUpload");
@@ -521,8 +506,7 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
   const idTypeSelect = document.getElementById("idTypeSelect");
   const idType = idTypeSelect.value;
   const subjectSelect = document.getElementById("subjectSelect");
-  const rawSubjectValue = subjectSelect.value;
-  const subjectName = rawSubjectValue === "__manage__" ? "" : rawSubjectValue; // "" = myself
+  const subjectName = subjectSelect.value; // "" = myself
 
   if (!idType) {
     setStatus(statusEl, "Choose a document type before uploading.", "error");
@@ -946,6 +930,7 @@ function buildFileCard(meta) {
     // synchronously from the click — not after an awaited decrypt. So we
     // open a blank tab right away and fill in its location once ready.
     const tab = isIOS() ? window.open("", "_blank") : null;
+    showTabLoading(tab);
     setButtonLoading(viewBtn, "Opening…");
     try {
       await ensureDecrypted();
@@ -971,6 +956,7 @@ function buildFileCard(meta) {
     // Android Chrome honors `download` correctly, so it keeps the
     // straightforward anchor-click approach.
     const tab = isIOS() ? window.open("", "_blank") : null;
+    showTabLoading(tab);
     setButtonLoading(downloadBtn, "Downloading…");
     try {
       await ensureDecrypted();
