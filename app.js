@@ -3,7 +3,7 @@
    ------------------------------------------------------------
    SET THESE THREE VALUES BEFORE DEPLOYING:
    ============================================================ */
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzOKYIehng7nEgUyty0BZruFnpNd6Uct1Cr1EVzoX-6vC9vdhIO1hTPjaTkIlgcuXNhLQ/exec";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbximmaznIUcuFJh5lklZ5Rls10qx3e3BfzDhfl7IcGVLXyat7rasaFr0OAEQAdWfGD5WA/exec";
 // A fixed salt for this deployment. Generate your own random 16 bytes
 // once (see README) and hardcode them here. This value is NOT secret,
 // but must stay the same forever for this vault (changing it means
@@ -350,7 +350,6 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
   }
   // else: no canary configured yet — proceed unverified (nothing to
   // check against; see generate-passphrase-check.html to set one up).
-  console.log("Passphrase check succeeded — unlocking vault.");
   vaultKey = candidateKey;
   await persistVaultKey();
   setStatus(statusEl, "");
@@ -431,20 +430,17 @@ let dependents = []; // only MY dependents — [{ name, addedAt }]
 let myDependentNames = new Set(); // same data, as a Set, for quick lookups (delete-menu gating)
 
 async function loadDependents() {
-  console.log("loadDependents() called");
   try {
     const res = await callBackend("listDependents", { idToken });
-    console.log("listDependents response:", res);
     if (res.ok) {
       dependents = res.dependents;
       myDependentNames = new Set(dependents.map(d => d.name));
       populateSubjectSelect();
-      console.log("Loaded dependents:", dependents.map(d => d.name).join(", "));
+      // console.log("Loaded dependents:", dependents.map(d => d.name).join(", "));
     } else {
       console.warn("listDependents failed:", res.error || "unknown backend error");
     }
   } catch (err) {
-    console.error("Couldn't load dependents:", err);
     // Non-fatal — the dropdown just won't offer any dependents yet;
     // this is set up entirely by the admin, directly in the sheet.
   }
