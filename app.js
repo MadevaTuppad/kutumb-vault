@@ -10,6 +10,8 @@ const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzOKYIehng7nEgU
 // nobody can decrypt previously-uploaded files).
 const SALT_BASE64 = "UHh8Nu4Ou0vh22k22/HVUQ==";
 const PBKDF2_ITERATIONS = 250000;
+// Must exactly match CHECK_PLAINTEXT in generate-passphrase-check.html.
+const CHECK_PLAINTEXT = "kutumb-vault-check-v1";
 
 /* ============================================================
    State (kept only in memory — never persisted to disk/storage)
@@ -103,13 +105,57 @@ function handleCredentialResponse(response) {
     .catch(() => setStatus(statusEl, "Couldn't reach the vault backend. Try again.", "error"));
 }
 
-document.getElementById("signOutBtn").addEventListener("click", () => {
+/** Clears all auth/session state. Shared by explicit sign-out and by
+ *  the automatic expired-session detection below. */
+function resetAuthState() {
   idToken = null;
   currentUser = null;
   vaultKey = null;
   document.getElementById("userBadge").classList.add("hidden");
+  // Without this, Google Identity Services silently re-selects the same
+  // account on the next "Sign in with Google" attempt instead of showing
+  // the account picker.
+  if (window.google && google.accounts && google.accounts.id) {
+    google.accounts.id.disableAutoSelect();
+  }
+}
+
+document.getElementById("signOutBtn").addEventListener("click", () => {
+  resetAuthState();
   showScreen("screenSignIn");
 });
+
+/* ------------------------------------------------------------
+   Re-check the session whenever the app becomes visible again
+   (phone unlocked, tab switched back to, app reopened from home
+   screen). Google's ID token is short-lived (~1 hour); without this,
+   a backgrounded tab keeps showing the old signed-in state even
+   after the token has quietly expired, and nothing tells the person
+   they need to sign in again until some action fails.
+   ------------------------------------------------------------ */
+let checkingSession = false;
+async function verifySessionOnResume() {
+  if (!idToken || checkingSession) return; // nothing to check, or already checking
+  checkingSession = true;
+  try {
+    const res = await callBackend("checkAccess", { idToken });
+    if (!res.ok) {
+      resetAuthState();
+      showScreen("screenSignIn");
+      setStatus(document.getElementById("signInStatus"),
+        "Your session expired — please sign in again.", "error");
+    }
+    // else: still valid, nothing to do — the UI wasn't actually stale.
+  } catch {
+    // Network hiccup — don't force a sign-out over a transient failure.
+  } finally {
+    checkingSession = false;
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") verifySessionOnResume();
+});
+window.addEventListener("pageshow", verifySessionOnResume);
 
 document.getElementById("lockBtn").addEventListener("click", () => {
   vaultKey = null; // drop the key from memory; passphrase must be re-entered
@@ -145,7 +191,33 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
   document.getElementById("passphraseInput").value = "";
   setStatus(statusEl, "Unlocking…");
   try {
-    vaultKey = await deriveKeyFromPassphrase(passphrase);
+    const candidateKey = await deriveKeyFromPassphrase(passphrase);
+    const checkRes = await callBackend("getPassphraseCheck", { idToken });
+
+    if (checkRes.ok && checkRes.exists) {
+      // A canary is configured — this is the real, reliable check.
+      // AES-GCM's authentication tag fails deterministically on any
+      // wrong key, so this never gives a false positive or negative.
+      try {
+        await decryptWithKey(
+          candidateKey,
+          base64ToBytes(checkRes.ciphertextBase64),
+          base64ToBytes(checkRes.ivBase64)
+        );
+      } catch {
+        setStatus(statusEl, "That passphrase doesn't look right — try again.", "error");
+        return;
+      }
+    } else if (!checkRes.ok) {
+      // Couldn't reach the check at all — fail safe by refusing to
+      // proceed rather than silently skipping verification.
+      setStatus(statusEl, "Couldn't verify the passphrase right now. Try again.", "error");
+      return;
+    }
+    // else: no canary configured yet — proceed unverified (nothing to
+    // check against; see generate-passphrase-check.html to set one up).
+
+    vaultKey = candidateKey;
     setStatus(statusEl, "");
     showScreen("screenVault");
     loadFileList();
@@ -167,6 +239,14 @@ async function encryptBytes(plainBytes) {
 async function decryptBytes(ciphertextBytes, ivBytes) {
   const plain = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: ivBytes }, vaultKey, ciphertextBytes
+  );
+  return new Uint8Array(plain);
+}
+// Same as decryptBytes, but takes an explicit key — used only to verify
+// the passphrase canary before vaultKey itself has been set.
+async function decryptWithKey(key, ciphertextBytes, ivBytes) {
+  const plain = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: ivBytes }, key, ciphertextBytes
   );
   return new Uint8Array(plain);
 }

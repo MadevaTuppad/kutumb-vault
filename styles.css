@@ -127,7 +127,7 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 
 .file-list{display:flex;flex-direction:column;gap:10px;}
 .file-card{
-  display:flex;align-items:center;gap:14px;
+  display:flex;align-items:center;flex-wrap:wrap;gap:10px 14px;
   background:var(--panel);
   border:1px solid var(--line);
   border-radius:var(--radius);
@@ -158,15 +158,23 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
   color:var(--text-muted);border:1px solid var(--line);
 }
 .file-thumb-error::after{content:"Tap View";}
-.file-meta{flex:1;min-width:0;}
-.file-meta .who{font-size:14px;color:var(--text);}
+.file-meta{flex:1 1 140px;min-width:0;}
+.file-meta .who{font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .file-meta .when{font-size:12px;color:var(--text-muted);}
-.file-actions{display:flex;gap:8px;}
+.file-actions{display:flex;gap:8px;flex-shrink:0;}
 .icon-btn{
   background:var(--panel-2);border:1px solid var(--line);border-radius:6px;
   padding:8px;color:var(--text);cursor:pointer;
 }
 .icon-btn:hover{border-color:var(--brass-dim);}
+
+/* Below ~480px, thumb+name+3 buttons no longer fit on one line without
+   the buttons overlapping the text. Drop the action row onto its own
+   line instead of letting it collide with the name/date. */
+@media (max-width:480px){
+  .file-actions{flex-basis:100%;justify-content:flex-end;}
+  .file-meta .who{white-space:normal;overflow:visible;text-overflow:clip;}
+}
 
 @media (prefers-reduced-motion: reduce){
   .file-thumb-loading{animation:none;}
