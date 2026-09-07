@@ -431,13 +431,17 @@ let dependents = []; // only MY dependents — [{ name, addedAt }]
 let myDependentNames = new Set(); // same data, as a Set, for quick lookups (delete-menu gating)
 
 async function loadDependents() {
+  console.log("loadDependents() called");
   try {
     const res = await callBackend("listDependents", { idToken });
+    console.log("listDependents response:", res);
     if (res.ok) {
       dependents = res.dependents;
       myDependentNames = new Set(dependents.map(d => d.name));
       populateSubjectSelect();
       console.log("Loaded dependents:", dependents.map(d => d.name).join(", "));
+    } else {
+      console.warn("listDependents failed:", res.error || "unknown backend error");
     }
   } catch (err) {
     console.error("Couldn't load dependents:", err);
