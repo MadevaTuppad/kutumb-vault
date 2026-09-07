@@ -440,7 +440,7 @@ async function loadDependents() {
     }
   } catch (err) {
     // Non-fatal — the dropdown just won't offer any dependents yet;
-    // "Myself" and "+ Add a family member…" still work.
+    // this is set up entirely by the admin, directly in the sheet.
   }
 }
 
@@ -458,10 +458,6 @@ function populateSubjectSelect(selectedName) {
     opt.textContent = dep.name;
     select.appendChild(opt);
   }
-  const addOpt = document.createElement("option");
-  addOpt.value = "__add_new__";
-  addOpt.textContent = "+ Add a family member…";
-  select.appendChild(addOpt);
   if (dependents.length > 0) {
     const manageOpt = document.createElement("option");
     manageOpt.value = "__manage__";
@@ -476,59 +472,35 @@ function populateSubjectSelect(selectedName) {
 
 document.getElementById("subjectSelect").addEventListener("change", async (e) => {
   const select = e.target;
+  if (select.value !== "__manage__") return;
 
-  if (select.value === "__manage__") {
-    select.value = ""; // this option only ever triggers an action, never stays selected
-    // Lightweight text-based removal flow — deliberately no new screen.
-    // Only ever offers MY dependents, since `dependents` already only
-    // contains ones I'm a guardian of.
-    const listText = dependents.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
-    const choice = prompt(`Remove which family member?\n${listText}\n\nType the number, or Cancel to keep everyone.`);
-    if (!choice) return;
-    const idx = parseInt(choice, 10) - 1;
-    if (isNaN(idx) || idx < 0 || idx >= dependents.length) {
-      alert("Didn't recognize that number — nothing was removed.");
-      return;
-    }
-    const target = dependents[idx];
-    if (!confirm(`Remove "${target.name}"? Her already-uploaded documents stay in the vault, just tagged as before — this only stops her being offered for new uploads.`)) {
-      return;
-    }
-    try {
-      const res = await callBackend("deleteDependent", { idToken, name: target.name });
-      if (!res.ok) {
-        alert("Couldn't remove her: " + (res.error || "unknown error"));
-        return;
-      }
-      await loadDependents();
-    } catch (err) {
-      alert(err.message || "Couldn't remove that family member.");
-    }
+  select.value = ""; // this option only ever triggers an action, never stays selected
+  // Lightweight text-based removal flow — deliberately no new screen.
+  // Only ever offers MY dependents, since `dependents` already only
+  // contains ones I'm a guardian of. Adding a new dependent is
+  // deliberately admin-only (done directly in the sheet), so there's
+  // no corresponding "add" branch here.
+  const listText = dependents.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
+  const choice = prompt(`Remove which family member?\n${listText}\n\nType the number, or Cancel to keep everyone.`);
+  if (!choice) return;
+  const idx = parseInt(choice, 10) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= dependents.length) {
+    alert("Didn't recognize that number — nothing was removed.");
     return;
   }
-
-  if (select.value !== "__add_new__") return;
-
-  const name = (prompt("Family member's name (e.g. \"Mother\"):") || "").trim();
-  if (!name) {
-    select.value = ""; // back to "Myself" — nothing was entered
+  const target = dependents[idx];
+  if (!confirm(`Remove "${target.name}"? Her already-uploaded documents stay in the vault, just tagged as before — this only stops her being offered for new uploads.`)) {
     return;
   }
-
   try {
-    const res = await callBackend("addDependent", { idToken, name });
+    const res = await callBackend("deleteDependent", { idToken, name: target.name });
     if (!res.ok) {
-      alert(res.error === "duplicate_name"
-        ? "That name is already on the list."
-        : "Couldn't add that family member: " + (res.error || "unknown error"));
-      select.value = "";
+      alert("Couldn't remove her: " + (res.error || "unknown error"));
       return;
     }
     await loadDependents();
-    populateSubjectSelect(name); // select the one just added
   } catch (err) {
-    alert(err.message || "Couldn't add that family member.");
-    select.value = "";
+    alert(err.message || "Couldn't remove that family member.");
   }
 });
 
@@ -548,7 +520,7 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
   const idType = idTypeSelect.value;
   const subjectSelect = document.getElementById("subjectSelect");
   const rawSubjectValue = subjectSelect.value;
-  const subjectName = (rawSubjectValue === "__add_new__" || rawSubjectValue === "__manage__") ? "" : rawSubjectValue; // "" = myself
+  const subjectName = rawSubjectValue === "__manage__" ? "" : rawSubjectValue; // "" = myself
 
   if (!idType) {
     setStatus(statusEl, "Choose a document type before uploading.", "error");
