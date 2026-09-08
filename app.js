@@ -315,6 +315,8 @@ function resetAuthState() {
   idToken = null;
   currentUser = null;
   vaultKey = null;
+  allFiles = [];
+  fileListLoadedOnce = false;
   clearPersistedAuth();
   clearPersistedVaultKey();
   document.getElementById("userBadge").classList.add("hidden");
@@ -572,7 +574,13 @@ async function loadDependents() {
       dependents = res.dependents;
       myDependentNames = new Set(dependents.map(d => d.name));
       populateSubjectSelect();
-      // console.log("Loaded dependents:", dependents.map(d => d.name).join(", "));
+      // Same reasoning as loadMemberOrderPreference — only re-render if
+      // the first real render already happened, otherwise skip (avoids
+      // a premature empty-state flash; loadFileList's own upcoming
+      // render will pick this up regardless). Needed here too since
+      // myDependentNames affects whether the delete menu shows on a
+      // guardian-owned document's card.
+      if (fileListLoadedOnce) renderFileList();
     } else {
       console.warn("listDependents failed:", res.error || "unknown backend error");
     }
@@ -713,6 +721,7 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
    ============================================================ */
 let allFiles = [];
 let fileListLoadFailed = false; // lets a resumed session auto-retry instead of leaving a stale error forever
+let fileListLoadedOnce = false; // guards against other parallel loaders (dependents, order preference) rendering before allFiles has real data
 let activeTab = "mine"; // "mine" | "family"
 let memberFilter = ""; // uploader email, "" = all
 
@@ -795,14 +804,16 @@ async function loadMemberOrderPreference() {
     const res = await callBackend("getMemberOrderPreference", { idToken });
     if (res.ok) {
       memberOrderPreference = Array.isArray(res.order) ? res.order : [];
-      // loadFileList() runs in parallel with this, not after it — if it
-      // already rendered using the still-empty default before this
-      // resolved, the saved order would otherwise never get applied
-      // until some unrelated action (switching tabs, etc.) happened to
-      // re-render. Both functions calling these is safe either way —
-      // whichever finishes last just re-renders with the final state.
-      populateMemberFilter();
-      renderFileList();
+      // Only re-render if loadFileList's own first render already
+      // happened — otherwise allFiles is still empty and rendering now
+      // would flash a false "you haven't uploaded any documents yet"
+      // before the real data arrives. If loadFileList hasn't rendered
+      // yet, its own upcoming render will correctly pick up this
+      // already-updated preference regardless, no separate call needed.
+      if (fileListLoadedOnce) {
+        populateMemberFilter();
+        renderFileList();
+      }
     }
   } catch (err) {
     // Non-fatal — falls back to the default order for this session.
@@ -886,6 +897,7 @@ async function loadFileList() {
       return;
     }
     fileListLoadFailed = false;
+    fileListLoadedOnce = true;
     allFiles = res.files;
     populateMemberFilter();
     renderFileList();
