@@ -1122,6 +1122,9 @@ function buildFileCard(meta) {
 
   const thumb = document.createElement("div");
   thumb.className = "file-thumb file-thumb-label";
+  if (ID_TYPE_CATEGORIES.official.includes(meta.idType)) {
+    thumb.classList.add("file-thumb-official");
+  }
   const isPdf = (meta.mimetype || "").toLowerCase().includes("pdf");
   // Fully static markup (never derived from meta/user data), matching
   // the existing precedent elsewhere in this file of using innerHTML

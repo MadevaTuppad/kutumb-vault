@@ -9,6 +9,7 @@
   --brass-dim:#8a7220;
   --danger:#c0574b;
   --success:#5b8c6e;
+  --official-accent:#6b8fb5;
   --radius:10px;
   --font-head:"Source Serif 4", Georgia, serif;
   --font-body:"Inter", system-ui, sans-serif;
@@ -250,6 +251,7 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
   letter-spacing:.03em;color:var(--text-muted);
   border:1px solid var(--line);
 }
+.file-thumb-official{border-color:var(--official-accent);}
 .file-meta{flex:1 1 140px;min-width:0;}
 .file-meta .who{font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .file-meta .when{font-size:12px;color:var(--text-muted);}
