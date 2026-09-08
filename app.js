@@ -1042,7 +1042,13 @@ function buildFileCard(meta) {
   const thumb = document.createElement("div");
   thumb.className = "file-thumb file-thumb-label";
   const isPdf = (meta.mimetype || "").toLowerCase().includes("pdf");
-  thumb.textContent = isPdf ? "PDF" : "IMG";
+  // Fully static markup (never derived from meta/user data), matching
+  // the existing precedent elsewhere in this file of using innerHTML
+  // only for fixed, trusted strings — same reasoning as the "All
+  // family members" option markup a few lines below.
+  const PDF_ICON_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 3h9l4 4v14a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M15 3v4h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><line x1="8" y1="13" x2="16" y2="13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><line x1="8" y1="16" x2="13" y2="16" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+  const IMG_ICON_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8.5" cy="9.5" r="1.6" fill="currentColor"/><path d="M3 16l5-5 4 4 3-3 6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+  thumb.innerHTML = (isPdf ? PDF_ICON_SVG : IMG_ICON_SVG) + "<span>" + (isPdf ? "PDF" : "IMG") + "</span>";
   card.appendChild(thumb);
 
   const metaEl = document.createElement("div");
