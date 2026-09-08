@@ -180,6 +180,11 @@ function showScreen(id) {
   ["screenSignIn", "screenPassphrase", "screenVault", "screenUpload"].forEach(s => {
     document.getElementById(s).classList.toggle("hidden", s !== id);
   });
+  // offsetHeight below forces a synchronous layout read, which is safe
+  // and accurate immediately after the classList change above — the
+  // browser flushes layout on demand for a read like this, no need to
+  // wait a tick. Only relevant once #screenVault is no longer hidden.
+  if (id === "screenVault") measureTabRowHeight();
 }
 
 /* ------------------------------------------------------------
@@ -373,6 +378,23 @@ function measureHeaderHeight() {
 }
 measureHeaderHeight();
 window.addEventListener("resize", measureHeaderHeight);
+
+// Same idea for the sticky per-person group headers on the Family tab
+// — they need to dock directly below the (also sticky) tab-row, not
+// guess a fixed pixel value. Unlike the header, the tab-row lives
+// inside #screenVault, which is display:none until unlock — reading
+// offsetHeight while hidden always returns 0 — so this can't just run
+// once at script startup like measureHeaderHeight does. showScreen()
+// calls this specifically whenever the vault screen becomes visible.
+function measureTabRowHeight() {
+  const tabRow = document.querySelector("#screenVault .tab-row");
+  if (tabRow) {
+    document.documentElement.style.setProperty("--tabrow-height", tabRow.offsetHeight + "px");
+  }
+}
+window.addEventListener("resize", () => {
+  if (!document.getElementById("screenVault").classList.contains("hidden")) measureTabRowHeight();
+});
 
 
 document.getElementById("lockBtn").addEventListener("click", () => {
@@ -860,8 +882,35 @@ function renderFileList() {
     if (cleanup) cleanup();
   }
   listEl.innerHTML = "";
-  for (const meta of filtered) {
-    listEl.appendChild(buildFileCard(meta));
+  if (activeTab === "family") {
+    // Group by person so it's easy to tell whose documents you're
+    // looking at, instead of scanning a flat mixed list. Works
+    // correctly whether unfiltered (multiple groups) or filtered to
+    // one person (naturally produces exactly one group/header — still
+    // sticky, so the "whose documents" context never scrolls away,
+    // even when there's only one person in view). `filtered` is
+    // already sorted by the dependents-first/preference order above,
+    // and Map preserves insertion order, so the groups come out in
+    // that same order for free — no extra sort needed here.
+    const groups = new Map(); // subjectKey -> { name, files: [] }
+    for (const meta of filtered) {
+      const key = subjectKeyOf(meta);
+      if (!groups.has(key)) groups.set(key, { name: subjectDisplayNameOf(meta), files: [] });
+      groups.get(key).files.push(meta);
+    }
+    for (const group of groups.values()) {
+      const header = document.createElement("div");
+      header.className = "member-group-header";
+      header.textContent = `${group.name} (${group.files.length})`;
+      listEl.appendChild(header);
+      for (const meta of group.files) {
+        listEl.appendChild(buildFileCard(meta));
+      }
+    }
+  } else {
+    for (const meta of filtered) {
+      listEl.appendChild(buildFileCard(meta));
+    }
   }
   setStatus(listStatus, filtered.length ? "" :
     (activeTab === "mine" ? "You haven't uploaded any documents yet." : "No documents match this filter."));
@@ -984,7 +1033,7 @@ function buildFileCard(meta) {
   // attacker-controllable (a family member could bypass the <select> and
   // POST an arbitrary string to the backend), so it must never be treated
   // as HTML here.
-  whoEl.textContent = (meta.idType ? meta.idType + " — " : "") + subjectDisplayNameOf(meta);
+  whoEl.textContent = meta.idType || "Document";
   metaEl.appendChild(whoEl);
 
   const whenEl = document.createElement("div");
