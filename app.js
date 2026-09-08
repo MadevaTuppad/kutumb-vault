@@ -769,10 +769,16 @@ async function saveMemberOrderPreference(orderedKeys) {
 
 // Every distinct subject currently in the vault, unordered — used both
 // to build the ordered list below and to populate the reorder panel.
+// Deliberately excludes the current user's own (non-dependent)
+// documents — those are already fully covered by My IDs, so offering
+// "yourself" as a filterable/orderable Family member would be
+// pointless. A dependent you're a guardian of still appears normally,
+// since that's a different person, not you.
 function getAllDistinctSubjects() {
   const seen = new Map(); // subjectKey -> display name
   for (const f of allFiles) {
     const key = subjectKeyOf(f);
+    if (key === currentUser.email) continue;
     if (!seen.has(key)) seen.set(key, subjectDisplayNameOf(f));
   }
   return seen;
@@ -859,9 +865,18 @@ function renderFileList() {
   const listStatus = document.getElementById("listStatus");
   const filterVal = document.getElementById("filterSelect").value;
 
-  let scoped = activeTab === "mine"
-    ? allFiles.filter(f => !f.subjectName && f.uploader === currentUser.email)
-    : (memberFilter ? allFiles.filter(f => subjectKeyOf(f) === memberFilter) : allFiles);
+  let scoped;
+  if (activeTab === "mine") {
+    scoped = allFiles.filter(f => !f.subjectName && f.uploader === currentUser.email);
+  } else {
+    // Family never includes the current user's own (non-dependent)
+    // documents — those are already fully covered by My IDs, so
+    // showing them here too would just be redundant. A dependent's
+    // document you uploaded still shows normally, since that belongs
+    // to the dependent, not you.
+    const familyFiles = allFiles.filter(f => subjectKeyOf(f) !== currentUser.email);
+    scoped = memberFilter ? familyFiles.filter(f => subjectKeyOf(f) === memberFilter) : familyFiles;
+  }
 
   const filtered = filterVal ? scoped.filter(f => f.idType === filterVal) : scoped;
 
@@ -1009,6 +1024,12 @@ function setActiveTab(tab) {
     memberSelect.value = "";
     document.getElementById("memberOrderPanel").classList.add("hidden");
   }
+  // Document-type filter is active on BOTH tabs (unlike the member
+  // filter, which only exists on Family) — a value picked on one tab
+  // was silently carrying over to the other, filtering out documents
+  // with no visible explanation why. Reset it on every switch so each
+  // tab always starts from a clean, predictable "All document types".
+  document.getElementById("filterSelect").value = "";
   renderFileList();
 }
 document.getElementById("tabMine").addEventListener("click", () => setActiveTab("mine"));
