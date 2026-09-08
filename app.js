@@ -306,6 +306,12 @@ function handleCredentialResponse(response) {
 /** Clears all auth/session state. Shared by explicit sign-out and by
  *  the automatic expired-session detection below. */
 function resetAuthState() {
+  // Must happen before idToken is cleared below — otherwise a pending
+  // delete's deferred backend call would fire later with either a null
+  // idToken (silent failure, document never actually deleted) or worse,
+  // a DIFFERENT family member's idToken if someone else signs in on
+  // this same device before the undo window naturally expires.
+  finalizePendingDelete();
   idToken = null;
   currentUser = null;
   vaultKey = null;
@@ -690,8 +696,11 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
     // Subject selection (Myself / a dependent) intentionally stays as-is —
     // convenient when uploading several documents for the same person in
     // a row, same reasoning as keeping the category tab selection.
-    loadFileList();
-    setTimeout(() => showScreen("screenVault"), 700);
+    await loadFileList();
+    setTimeout(() => {
+      showScreen("screenVault");
+      highlightNewCard(res.fileId);
+    }, 700);
   } catch (err) {
     setStatus(statusEl, "Something went wrong encrypting that file.", "error");
   } finally {
@@ -706,6 +715,49 @@ let allFiles = [];
 let fileListLoadFailed = false; // lets a resumed session auto-retry instead of leaving a stale error forever
 let activeTab = "mine"; // "mine" | "family"
 let memberFilter = ""; // uploader email, "" = all
+
+// Delete is optimistic with a brief undo window, rather than an
+// immediate irreversible call — the document disappears from view
+// right away, but the actual backend deletion is deferred until the
+// window expires without an Undo tap. Only one pending delete at a
+// time, since there's only one toast to show it in; starting a new
+// delete while one is already pending finalizes the older one first.
+let pendingDelete = null; // { meta } or null
+let pendingDeleteTimeoutId = null;
+
+function showUndoToast(meta) {
+  document.getElementById("undoToastMessage").textContent = `Deleted ${meta.idType || "document"}.`;
+  document.getElementById("undoToast").classList.remove("hidden");
+}
+function hideUndoToast() {
+  document.getElementById("undoToast").classList.add("hidden");
+}
+function finalizePendingDelete() {
+  if (!pendingDelete) return;
+  const { meta } = pendingDelete;
+  clearTimeout(pendingDeleteTimeoutId);
+  pendingDelete = null;
+  pendingDeleteTimeoutId = null;
+  hideUndoToast();
+  callBackend("deleteFile", { idToken, driveFileId: meta.driveFileId }).catch(err => {
+    // Best-effort — the document already looks deleted in the UI (and
+    // stays that way until the next refresh); the undo window has
+    // already closed, so there's nothing more useful to surface here
+    // than a console note for debugging.
+    console.warn("Couldn't finalize delete:", err);
+  });
+}
+document.getElementById("undoDeleteBtn").addEventListener("click", () => {
+  if (!pendingDelete) return;
+  const { meta } = pendingDelete;
+  clearTimeout(pendingDeleteTimeoutId);
+  pendingDelete = null;
+  pendingDeleteTimeoutId = null;
+  hideUndoToast();
+  allFiles.push(meta);
+  populateMemberFilter();
+  renderFileList();
+});
 
 // Closes any open per-card "⋯" menu — called both when a click lands
 // outside every menu, and before opening a different one (so at most
@@ -996,6 +1048,7 @@ document.getElementById("saveMemberOrderBtn").addEventListener("click", async (e
   document.getElementById("memberOrderPanel").classList.add("hidden");
   populateMemberFilter();
   renderFileList();
+  setStatus(document.getElementById("listStatus"), "Order saved.", "success");
 });
 
 document.getElementById("resetMemberOrderBtn").addEventListener("click", () => {
@@ -1035,9 +1088,25 @@ function setActiveTab(tab) {
 document.getElementById("tabMine").addEventListener("click", () => setActiveTab("mine"));
 document.getElementById("tabFamily").addEventListener("click", () => setActiveTab("family"));
 
+// Scrolls a freshly uploaded document into view and gives it a brief
+// highlight flash, closing the "did it work, and where did it go" gap
+// — especially relevant now that documents land inside a specific
+// person's group rather than obviously at the top of a flat list. If
+// the current tab/filter doesn't happen to show this document, this
+// silently does nothing rather than force-switching the person's view.
+function highlightNewCard(driveFileId) {
+  if (!driveFileId) return;
+  const card = document.querySelector(`.file-card[data-drive-file-id="${CSS.escape(driveFileId)}"]`);
+  if (!card) return;
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.classList.add("file-card-highlight");
+  setTimeout(() => card.classList.remove("file-card-highlight"), 2000);
+}
+
 function buildFileCard(meta) {
   const card = document.createElement("div");
   card.className = "file-card";
+  card.dataset.driveFileId = meta.driveFileId;
 
   const thumb = document.createElement("div");
   thumb.className = "file-thumb file-thumb-label";
@@ -1106,26 +1175,19 @@ function buildFileCard(meta) {
       e.stopPropagation();
       dropdown.classList.remove("open");
       const label = meta.idType || "this document";
-      if (!(await customConfirm(`Delete this ${label}? This can't be undone.`))) return;
+      if (!(await customConfirm(`Delete this ${label}?`))) return;
 
-      deleteItem.disabled = true;
-      deleteItem.textContent = "Deleting…";
-      try {
-        const res = await callBackend("deleteFile", { idToken, driveFileId: meta.driveFileId });
-        if (!res.ok) {
-          await customAlert("Couldn't delete: " + (res.error || "unknown error"));
-          deleteItem.disabled = false;
-          deleteItem.textContent = "Delete";
-          return;
-        }
-        allFiles = allFiles.filter(f => f.driveFileId !== meta.driveFileId);
-        populateMemberFilter();
-        renderFileList(); // also runs the usual cardCleanups for every discarded card, including this one
-      } catch (err) {
-        await customAlert(err.message || "Couldn't delete this document.");
-        deleteItem.disabled = false;
-        deleteItem.textContent = "Delete";
-      }
+      // Only one pending delete at a time — if a previous one is still
+      // in its undo window, finalize it now before starting this one.
+      finalizePendingDelete();
+
+      allFiles = allFiles.filter(f => f.driveFileId !== meta.driveFileId);
+      populateMemberFilter();
+      renderFileList(); // also runs the usual cardCleanups for every discarded card, including this one
+
+      pendingDelete = { meta };
+      pendingDeleteTimeoutId = setTimeout(finalizePendingDelete, 6000);
+      showUndoToast(meta);
     });
 
     card.appendChild(menuWrap);

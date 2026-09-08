@@ -47,6 +47,8 @@ body{
   font-size:13px;cursor:pointer;padding:8px 4px;text-decoration:underline;text-underline-offset:3px;
 }
 .link-btn:hover, .link-btn:active{color:var(--text);}
+.link-btn-danger{color:var(--danger);}
+.link-btn-danger:hover, .link-btn-danger:active{color:var(--danger);opacity:.8;}
 
 .hidden{display:none !important;}
 .visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);}
@@ -124,6 +126,7 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 @keyframes spin{to{transform:rotate(360deg);}}
 @media (prefers-reduced-motion:reduce){
   .spinner{animation:none;}
+  .file-card-highlight{animation:none;background-color:rgba(91,140,110,.3);}
 }
 
 .upload-panel{margin-bottom:36px;}
@@ -216,7 +219,7 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 .file-list{display:flex;flex-direction:column;gap:10px;}
 .member-group-header{
   font-family:var(--font-head);font-weight:600;font-size:15px;
-  color:var(--brass);margin:14px 0 2px;padding:8px 0;
+  color:var(--text);margin:14px 0 2px;padding:8px 0;
   position:sticky;
   top:calc(var(--header-height, 76px) + var(--tabrow-height, 44px));
   background:var(--bg);
@@ -230,6 +233,12 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
   border:1px solid var(--line);
   border-radius:var(--radius);
   padding:12px;
+  scroll-margin-top:calc(var(--header-height, 76px) + var(--tabrow-height, 44px) + 60px);
+}
+.file-card-highlight{animation:card-highlight-flash 2s ease-out;}
+@keyframes card-highlight-flash{
+  0%{background-color:rgba(91,140,110,.3);}
+  100%{background-color:var(--panel);}
 }
 .file-thumb{
   width:56px;height:56px;border-radius:6px;object-fit:cover;
@@ -238,7 +247,7 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 .file-thumb-label{
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
   font-family:var(--font-body);font-size:10px;font-weight:600;
-  letter-spacing:.03em;color:var(--brass);
+  letter-spacing:.03em;color:var(--text-muted);
   border:1px solid var(--line);
 }
 .file-meta{flex:1 1 140px;min-width:0;}
@@ -253,7 +262,7 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 
 .file-menu{position:relative;flex-shrink:0;}
 .file-menu-btn{
-  background:none;border:none;color:var(--text-muted);
+  background:var(--panel-2);border:1px solid var(--line);color:var(--text-muted);
   font-size:18px;line-height:1;padding:13px 14px;border-radius:6px;cursor:pointer;
   /* ~44px tap target — this button guards a destructive action (Delete),
      so it gets extra room rather than the tighter padding used elsewhere. */
@@ -286,6 +295,21 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 @media (prefers-reduced-motion: no-preference){
   .card{animation:fadein .25s ease-out;}
   @keyframes fadein{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:translateY(0);}}
+}
+
+.undo-toast{
+  position:fixed;left:20px;right:20px;bottom:20px;
+  max-width:400px;margin:0 auto;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:16px;
+  box-shadow:0 6px 20px rgba(0,0,0,.4);
+  font-size:14px;color:var(--text);
+  z-index:50; /* above regular content, below the confirm modal (100) */
+}
+@media (max-width:640px){
+  /* Clears the floating upload button, which occupies this same
+     bottom-right zone on mobile — see .upload-cta's own media query. */
+  .undo-toast{bottom:calc(84px + env(safe-area-inset-bottom));}
 }
 
 .modal-overlay{
