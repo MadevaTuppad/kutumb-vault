@@ -82,6 +82,18 @@ input[type="password"], input[type="text"], select{
 }
 select:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
+/* :focus-visible (not :focus) so this only shows for keyboard navigation,
+   not on every mouse click — buttons had no focus indicator at all
+   before this, a real accessibility gap for keyboard-only users. */
+.primary-btn:focus-visible,
+.link-btn:focus-visible,
+.icon-btn:focus-visible,
+.tab-btn:focus-visible,
+.file-menu-btn:focus-visible,
+.member-order-chip:focus-visible,
+.back-btn:focus-visible{
+  outline:2px solid var(--brass-dim);outline-offset:2px;
+}
 
 .primary-btn{
   background:var(--brass);
@@ -154,6 +166,20 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 }
 
 .tab-row{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid var(--line);}
+/* Sticky only for the vault dashboard's My IDs/Family tabs — thumb
+   reachability without a scroll-to-top, same reasoning as the FAB
+   fix. NOT applied to the upload screen's category tabs (same base
+   class, different ancestor), which have no need to stick.
+   --header-height is set by JS to the header's actual rendered
+   height (see measureHeaderHeight in app.js) since it varies by
+   device — safe-area-inset-top differs between a notched iPhone and
+   a plain Android/desktop, so a fixed px guess here would either
+   overlap the header or leave an ugly gap on some devices. */
+#screenVault .tab-row{
+  position:sticky;top:var(--header-height, 76px);background:var(--bg);
+  z-index:9; /* below .topbar (10) and .file-menu-dropdown (20), above regular content */
+  padding-top:8px;
+}
 .tab-btn{
   background:none;border:none;color:var(--text-muted);
   font-family:var(--font-body);font-size:14px;font-weight:500;
@@ -165,6 +191,27 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
 
 .filter-row{margin-bottom:14px;display:flex;gap:10px;}
 .filter-row select{margin-bottom:0;flex:1;min-width:0;}
+
+#memberOrderPanel{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:14px;margin-bottom:14px;
+}
+.member-order-chips{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 14px;}
+.member-order-chip{
+  background:var(--panel-2);border:1px solid var(--line);border-radius:20px;
+  padding:8px 14px;color:var(--text);cursor:pointer;font-size:14px;
+  display:flex;align-items:center;gap:7px;font-family:var(--font-body);
+}
+.member-order-chip.selected{border-color:var(--brass);color:var(--brass);}
+.member-order-chip:active{border-color:var(--brass-dim);}
+.member-order-chip .badge{
+  background:var(--brass);color:#22190a;border-radius:50%;
+  width:18px;height:18px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  font-size:11px;font-weight:700;
+}
+.member-order-actions{display:flex;flex-wrap:wrap;align-items:center;gap:14px;}
+.member-order-actions .primary-btn{width:auto;padding:9px 16px;font-size:14px;}
 
 .file-list{display:flex;flex-direction:column;gap:10px;}
 .file-card{
@@ -230,3 +277,16 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
   .card{animation:fadein .25s ease-out;}
   @keyframes fadein{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:translateY(0);}}
 }
+
+.modal-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.6);
+  display:flex;align-items:center;justify-content:center;
+  z-index:100;padding:20px;
+}
+.modal-card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:22px 20px;max-width:360px;width:100%;
+}
+.modal-message{font-size:15px;color:var(--text);margin:0 0 20px;line-height:1.5;white-space:pre-line;}
+.modal-actions{display:flex;justify-content:flex-end;align-items:center;gap:16px;}
+.modal-actions .primary-btn{width:auto;padding:9px 18px;font-size:14px;}

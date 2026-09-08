@@ -108,6 +108,74 @@ function clearButtonLoading(btn) {
     delete btn.dataset.originalText;
   }
 }
+
+// Drop-in replacements for confirm()/alert() that match the app's own
+// dark theme instead of a plain system dialog. Same calling shape
+// (returns a Promise the caller awaits) so each call site only needed
+// "confirm(...)" -> "await customConfirm(...)" and "alert(...)" ->
+// "await customAlert(...)", not a restructure.
+function customConfirm(message) {
+  return new Promise(resolve => {
+    const overlay = document.getElementById("customModalOverlay");
+    const cancelBtn = document.getElementById("customModalCancelBtn");
+    const confirmBtn = document.getElementById("customModalConfirmBtn");
+    const previouslyFocused = document.activeElement;
+    document.getElementById("customModalMessage").textContent = message;
+    cancelBtn.classList.remove("hidden");
+    confirmBtn.textContent = "OK";
+    overlay.classList.remove("hidden");
+    cancelBtn.focus(); // safer default focus for a destructive-action confirm
+
+    function onKeydown(e) {
+      if (e.key === "Escape") { cleanup(false); return; }
+      if (e.key !== "Tab") return;
+      e.preventDefault(); // only two buttons — a minimal trap between them
+      (document.activeElement === cancelBtn ? confirmBtn : cancelBtn).focus();
+    }
+    function cleanup(result) {
+      overlay.classList.add("hidden");
+      cancelBtn.removeEventListener("click", onCancel);
+      confirmBtn.removeEventListener("click", onConfirm);
+      document.removeEventListener("keydown", onKeydown);
+      if (previouslyFocused && previouslyFocused.focus) previouslyFocused.focus();
+      resolve(result);
+    }
+    function onCancel() { cleanup(false); }
+    function onConfirm() { cleanup(true); }
+    cancelBtn.addEventListener("click", onCancel);
+    confirmBtn.addEventListener("click", onConfirm);
+    document.addEventListener("keydown", onKeydown);
+  });
+}
+function customAlert(message) {
+  return new Promise(resolve => {
+    const overlay = document.getElementById("customModalOverlay");
+    const cancelBtn = document.getElementById("customModalCancelBtn");
+    const confirmBtn = document.getElementById("customModalConfirmBtn");
+    const previouslyFocused = document.activeElement;
+    document.getElementById("customModalMessage").textContent = message;
+    cancelBtn.classList.add("hidden"); // alert only ever needs the one button
+    confirmBtn.textContent = "OK";
+    overlay.classList.remove("hidden");
+    confirmBtn.focus();
+
+    function onKeydown(e) {
+      if (e.key === "Escape") { cleanup(); return; }
+      if (e.key === "Tab") { e.preventDefault(); confirmBtn.focus(); } // only one button — trap on it
+    }
+    function cleanup() {
+      overlay.classList.add("hidden");
+      confirmBtn.removeEventListener("click", onConfirm);
+      document.removeEventListener("keydown", onKeydown);
+      if (previouslyFocused && previouslyFocused.focus) previouslyFocused.focus();
+      resolve();
+    }
+    function onConfirm() { cleanup(); }
+    confirmBtn.addEventListener("click", onConfirm);
+    document.addEventListener("keydown", onKeydown);
+  });
+}
+
 function showScreen(id) {
   ["screenSignIn", "screenPassphrase", "screenVault", "screenUpload"].forEach(s => {
     document.getElementById(s).classList.toggle("hidden", s !== id);
@@ -293,6 +361,20 @@ function onAppResume() {
   if (fileListLoadFailed && vaultKey) loadFileList();
 }
 
+// Keeps --header-height accurate so the sticky tab-row (see styles.css)
+// sits directly below the header, never overlapping or gapped — the
+// header's real height varies by device (safe-area-inset-top differs
+// on a notched phone vs. a plain one), so this can't be a fixed guess.
+function measureHeaderHeight() {
+  const header = document.querySelector(".topbar");
+  if (header) {
+    document.documentElement.style.setProperty("--header-height", header.offsetHeight + "px");
+  }
+}
+measureHeaderHeight();
+window.addEventListener("resize", measureHeaderHeight);
+
+
 document.getElementById("lockBtn").addEventListener("click", () => {
   vaultKey = null; // drop the key from memory; passphrase must be re-entered
   clearPersistedVaultKey(); // otherwise a refresh right after Lock would silently restore it
@@ -382,6 +464,7 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
   showScreen("screenVault");
   loadFileList();
   loadDependents();
+  loadMemberOrderPreference();
 });
 
 /* ============================================================
@@ -541,7 +624,7 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
   );
   if (existing) {
     const kindLabel = newIsPdf ? "PDF" : "image";
-    const proceed = confirm(`${subjectName ? subjectName : "You"} already ${subjectName ? "has" : "have"} a ${idType} (${kindLabel}) in the vault. Replace it with this new one?`);
+    const proceed = await customConfirm(`${subjectName ? subjectName : "You"} already ${subjectName ? "has" : "have"} a ${idType} (${kindLabel}) in the vault. Replace it with this new one?`);
     if (!proceed) {
       inputEl.value = "";
       return;
@@ -623,27 +706,90 @@ function subjectDisplayNameOf(f) {
   return f.subjectName || f.uploaderName || f.uploader;
 }
 
-function populateMemberFilter() {
-  const select = document.getElementById("memberFilterSelect");
-  const previousValue = select.value;
+/* ------------------------------------------------------------
+   Family-view ordering: dependents always come first by default,
+   with an optional PERSONAL override. Stored on the backend, keyed to
+   the caller's own verified email, so it follows the person across
+   devices — same as everything else in this app. Loaded once per
+   session into memberOrderPreference (see loadMemberOrderPreference,
+   called alongside loadDependents), then read synchronously here.
+   ------------------------------------------------------------ */
+let memberOrderPreference = []; // cached in-memory after loading from the backend once per session
 
-  // Distinct subjects (account holders + dependents), sorted by name.
+async function loadMemberOrderPreference() {
+  try {
+    const res = await callBackend("getMemberOrderPreference", { idToken });
+    if (res.ok) {
+      memberOrderPreference = Array.isArray(res.order) ? res.order : [];
+      // loadFileList() runs in parallel with this, not after it — if it
+      // already rendered using the still-empty default before this
+      // resolved, the saved order would otherwise never get applied
+      // until some unrelated action (switching tabs, etc.) happened to
+      // re-render. Both functions calling these is safe either way —
+      // whichever finishes last just re-renders with the final state.
+      populateMemberFilter();
+      renderFileList();
+    }
+  } catch (err) {
+    // Non-fatal — falls back to the default order for this session.
+  }
+}
+
+async function saveMemberOrderPreference(orderedKeys) {
+  memberOrderPreference = orderedKeys; // apply locally right away, don't wait on the network
+  try {
+    await callBackend("setMemberOrderPreference", { idToken, order: orderedKeys });
+  } catch (err) {
+    // Non-fatal — it's still applied for this session; just might not
+    // have saved server-side this time (e.g. a network hiccup).
+  }
+}
+
+// Every distinct subject currently in the vault, unordered — used both
+// to build the ordered list below and to populate the reorder panel.
+function getAllDistinctSubjects() {
   const seen = new Map(); // subjectKey -> display name
   for (const f of allFiles) {
     const key = subjectKeyOf(f);
     if (!seen.has(key)) seen.set(key, subjectDisplayNameOf(f));
   }
-  const members = [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  return seen;
+}
+
+// Combines the personal preference (if any) with the default order
+// (dependents first, then alphabetical) for whoever wasn't explicitly
+// placed. Used by both the member filter dropdown and the Family-tab
+// document list, so they always agree with each other.
+function getOrderedSubjects() {
+  const seen = getAllDistinctSubjects();
+  const allKeys = [...seen.keys()];
+
+  const defaultOrder = allKeys.slice().sort((a, b) => {
+    const aIsDep = a.startsWith("dep:");
+    const bIsDep = b.startsWith("dep:");
+    if (aIsDep !== bIsDep) return aIsDep ? -1 : 1;
+    return seen.get(a).localeCompare(seen.get(b));
+  });
+
+  const preference = memberOrderPreference.filter(k => seen.has(k)); // drop stale keys no longer present
+  const remaining = defaultOrder.filter(k => !preference.includes(k));
+  return [...preference, ...remaining].map(key => ({ key, name: seen.get(key) }));
+}
+
+function populateMemberFilter() {
+  const select = document.getElementById("memberFilterSelect");
+  const previousValue = select.value;
+  const ordered = getOrderedSubjects();
 
   select.innerHTML = '<option value="">All family members</option>';
-  for (const [key, name] of members) {
+  for (const { key, name } of ordered) {
     const opt = document.createElement("option");
     opt.value = key;
     opt.textContent = name;
     select.appendChild(opt);
   }
   // Keep the previous selection if that member still has files.
-  if (previousValue && seen.has(previousValue)) {
+  if (previousValue && ordered.some(o => o.key === previousValue)) {
     select.value = previousValue;
   } else {
     memberFilter = "";
@@ -697,6 +843,14 @@ function renderFileList() {
 
   const filtered = filterVal ? scoped.filter(f => f.idType === filterVal) : scoped;
 
+  // Dependents first, then personal-preference order, matching the
+  // member filter dropdown — only meaningful on Family (My IDs is
+  // always just one person, so there's nothing to reorder).
+  if (activeTab === "family") {
+    const rank = new Map(getOrderedSubjects().map((o, i) => [o.key, i]));
+    filtered.sort((a, b) => (rank.get(subjectKeyOf(a)) ?? 999) - (rank.get(subjectKeyOf(b)) ?? 999));
+  }
+
   // Release resources held by the cards about to be discarded: revoke any
   // decrypted blob URL, and stop observing thumbnails that never scrolled
   // into view (otherwise IntersectionObserver keeps a reference to the
@@ -720,19 +874,91 @@ document.getElementById("memberFilterSelect").addEventListener("change", (e) => 
   renderFileList();
 });
 
+/* ------------------------------------------------------------
+   "Order family members" panel — tap chips in the order you want;
+   tap again to remove one (the rest renumber automatically).
+   ------------------------------------------------------------ */
+let pendingMemberOrder = []; // subject keys, in tap order, only while the panel is open
+
+function renderMemberOrderChips() {
+  const container = document.getElementById("memberOrderChips");
+  container.innerHTML = "";
+  const seen = getAllDistinctSubjects();
+  // Show in the current default order so the chips themselves aren't
+  // jumping around as you tap — only the badges/selection change.
+  const displayOrder = [...seen.keys()].sort((a, b) => {
+    const aIsDep = a.startsWith("dep:");
+    const bIsDep = b.startsWith("dep:");
+    if (aIsDep !== bIsDep) return aIsDep ? -1 : 1;
+    return seen.get(a).localeCompare(seen.get(b));
+  });
+
+  for (const key of displayOrder) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "member-order-chip";
+    const idx = pendingMemberOrder.indexOf(key);
+    if (idx !== -1) {
+      chip.classList.add("selected");
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = String(idx + 1);
+      chip.appendChild(badge);
+    }
+    chip.appendChild(document.createTextNode(seen.get(key)));
+    chip.addEventListener("click", () => {
+      const i = pendingMemberOrder.indexOf(key);
+      if (i !== -1) {
+        pendingMemberOrder.splice(i, 1); // tap again to remove — remaining renumber
+      } else {
+        pendingMemberOrder.push(key);
+      }
+      renderMemberOrderChips();
+    });
+    container.appendChild(chip);
+  }
+}
+
+document.getElementById("orderMembersBtn").addEventListener("click", () => {
+  pendingMemberOrder = memberOrderPreference.filter(k => getAllDistinctSubjects().has(k));
+  renderMemberOrderChips();
+  document.getElementById("memberOrderPanel").classList.remove("hidden");
+});
+
+document.getElementById("saveMemberOrderBtn").addEventListener("click", async (e) => {
+  setButtonLoading(e.target, "Saving…");
+  await saveMemberOrderPreference(pendingMemberOrder);
+  clearButtonLoading(e.target);
+  document.getElementById("memberOrderPanel").classList.add("hidden");
+  populateMemberFilter();
+  renderFileList();
+});
+
+document.getElementById("resetMemberOrderBtn").addEventListener("click", () => {
+  pendingMemberOrder = [];
+  renderMemberOrderChips();
+});
+
+document.getElementById("cancelMemberOrderBtn").addEventListener("click", () => {
+  document.getElementById("memberOrderPanel").classList.add("hidden");
+});
+
 function setActiveTab(tab) {
   activeTab = tab;
   const mineBtn = document.getElementById("tabMine");
   const familyBtn = document.getElementById("tabFamily");
   const memberSelect = document.getElementById("memberFilterSelect");
+  const orderBtn = document.getElementById("orderMembersBtn");
   mineBtn.classList.toggle("active", tab === "mine");
   familyBtn.classList.toggle("active", tab === "family");
   mineBtn.setAttribute("aria-selected", tab === "mine");
   familyBtn.setAttribute("aria-selected", tab === "family");
   memberSelect.classList.toggle("hidden", tab !== "family");
+  orderBtn.classList.toggle("hidden", tab !== "family");
   if (tab !== "family") {
     memberFilter = "";
     memberSelect.value = "";
+    document.getElementById("memberOrderPanel").classList.add("hidden");
   }
   renderFileList();
 }
@@ -804,14 +1030,14 @@ function buildFileCard(meta) {
       e.stopPropagation();
       dropdown.classList.remove("open");
       const label = meta.idType || "this document";
-      if (!confirm(`Delete this ${label}? This can't be undone.`)) return;
+      if (!(await customConfirm(`Delete this ${label}? This can't be undone.`))) return;
 
       deleteItem.disabled = true;
       deleteItem.textContent = "Deleting…";
       try {
         const res = await callBackend("deleteFile", { idToken, driveFileId: meta.driveFileId });
         if (!res.ok) {
-          alert("Couldn't delete: " + (res.error || "unknown error"));
+          await customAlert("Couldn't delete: " + (res.error || "unknown error"));
           deleteItem.disabled = false;
           deleteItem.textContent = "Delete";
           return;
@@ -820,7 +1046,7 @@ function buildFileCard(meta) {
         populateMemberFilter();
         renderFileList(); // also runs the usual cardCleanups for every discarded card, including this one
       } catch (err) {
-        alert(err.message || "Couldn't delete this document.");
+        await customAlert(err.message || "Couldn't delete this document.");
         deleteItem.disabled = false;
         deleteItem.textContent = "Delete";
       }
@@ -892,7 +1118,7 @@ function buildFileCard(meta) {
       }
     } catch {
       if (tab) tab.close();
-      alert("Couldn't decrypt this file — check the passphrase.");
+      await customAlert("Couldn't decrypt this file — check the passphrase.");
     } finally {
       clearButtonLoading(viewBtn);
     }
@@ -924,7 +1150,7 @@ function buildFileCard(meta) {
       }
     } catch {
       if (tab) tab.close();
-      alert("Couldn't decrypt this file — check the passphrase.");
+      await customAlert("Couldn't decrypt this file — check the passphrase.");
     } finally {
       clearButtonLoading(downloadBtn);
     }
@@ -949,7 +1175,7 @@ function buildFileCard(meta) {
         // Person just canceled the native share sheet — not a real error.
         return;
       }
-      alert("Couldn't decrypt this file — check the passphrase.");
+      await customAlert("Couldn't decrypt this file — check the passphrase.");
     } finally {
       clearButtonLoading(shareBtn);
     }
@@ -1011,6 +1237,7 @@ function buildFileCard(meta) {
       showScreen("screenVault");
       loadFileList();
       loadDependents();
+      loadMemberOrderPreference();
       return;
     } catch {
       clearPersistedVaultKey(); // fall through to the passphrase screen below
