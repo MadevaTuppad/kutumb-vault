@@ -409,7 +409,13 @@ async function verifySessionOnResume() {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") onAppResume();
 });
-window.addEventListener("pageshow", onAppResume);
+window.addEventListener("pageshow", (e) => {
+  // pageshow fires on every load, not just a bfcache restore — only the
+  // bfcache case (e.persisted) actually needs this; a fresh load already
+  // gets equivalent verification from restoreSessionOnLoad() below,
+  // making a second checkAccess call here redundant otherwise.
+  if (e.persisted) onAppResume();
+});
 
 function onAppResume() {
   verifySessionOnResume();
@@ -1340,6 +1346,7 @@ function buildFileCard(meta) {
         a.href = decryptedUrl;
         a.download = `${filenameBase}.${ext}`;
         a.click();
+        setStatus(document.getElementById("listStatus"), `Downloaded ${filenameBase}.${ext}`, "success");
       }
     } catch (err) {
       if (tab) tab.close();
