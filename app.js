@@ -204,6 +204,23 @@ function extFromMimetype(mimetype) {
   if (mt.includes("heic") || mt.includes("heif")) return "heic";
   return "jpg";
 }
+// Broader than just replacing spaces — a person's name is free-form text
+// (unlike idType, always one of a small fixed safe list), so this strips
+// anything that isn't a letter/number before it ends up in a real filename.
+function slugify(text) {
+  return String(text || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+// Shared by Download and Share — previously each built this separately,
+// and Share's copy quietly drifted to a generic "id-document" name while
+// Download used the actual document type. Single source of truth now.
+// Includes the person's name so that, e.g., downloading Aadhaar for two
+// different family members on the Family tab doesn't produce two files
+// with the identical name (which would silently overwrite one another).
+function filenameBaseFor(meta) {
+  const typeSlug = slugify(meta.idType) || "id-document";
+  const nameSlug = slugify(subjectDisplayNameOf(meta));
+  return nameSlug ? `${typeSlug}-${nameSlug}` : typeSlug;
+}
 
 // Fills the tab opened synchronously (to dodge iOS Safari's popup
 // blocker — see isIOS() usage below) with a visible loading message,
@@ -246,38 +263,66 @@ const LARGE_PAYLOAD_ACTIONS = new Set(["uploadFile", "getFile"]);
 const DEFAULT_TIMEOUT_MS = 60000;
 const LARGE_PAYLOAD_TIMEOUT_MS = 120000;
 
+// uploadFile is deliberately excluded from automatic retry — unlike every
+// other action, it's not idempotent. If the original request actually
+// succeeded server-side but the response was lost in transit (exactly the
+// kind of transient failure this retry logic exists to smooth over), a
+// blind retry would create a duplicate document instead of just retrying
+// safely. Every other action here is either read-only or naturally safe
+// to repeat (e.g. deleting an already-deleted file just returns "not
+// found", overwriting the same order preference twice is harmless).
+const NON_RETRYABLE_ACTIONS = new Set(["uploadFile"]);
+// One retry, not several — this matches the actual evidence from this
+// whole investigation: failures have consistently resolved on the very
+// next attempt, never required multiple tries. Adding more retries would
+// only stretch out the worst-case wait before a genuine, non-transient
+// failure is finally shown to the person, without real evidence it'd help.
+const RETRY_DELAY_MS = 1000;
+
 async function callBackend(action, payload) {
   const timeoutMs = LARGE_PAYLOAD_ACTIONS.has(action) ? LARGE_PAYLOAD_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
-  const controller = new AbortController();
-  // If nothing comes back in time, something (a network issue, a blocked
-  // request, an extension silently intercepting it) is preventing this
-  // from ever settling on its own — fail loudly instead of leaving the
-  // UI stuck on a loading message forever.
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  let res;
-  try {
-    res = await fetch(APPS_SCRIPT_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action, ...payload }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    if (err.name === "AbortError") {
-      // Note: aborting here only stops the client from waiting — Apps
-      // Script may still finish executing server-side (e.g. an upload
-      // can still land even though this call reports failure). If a
-      // person retries after an upload timeout, a duplicate entry is
-      // possible; not fixable from the client side alone.
-      throw new Error("Request timed out — check your connection (or try disabling browser extensions) and try again.");
+  const maxAttempts = NON_RETRYABLE_ACTIONS.has(action) ? 1 : 2;
+
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (attempt > 1) await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+    const controller = new AbortController();
+    // If nothing comes back in time, something (a network issue, a blocked
+    // request, an extension silently intercepting it) is preventing this
+    // from ever settling on its own — fail loudly instead of leaving the
+    // UI stuck on a loading message forever.
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(APPS_SCRIPT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ action, ...payload }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (!res.ok) {
+        // Transport-level failure (e.g. the intermittent 404s from Apps
+        // Script's own redirect mechanism) — worth retrying once, not a
+        // reason to give up immediately.
+        lastErr = new Error("Network error: " + res.status);
+        continue;
+      }
+      return await res.json(); // a real answer, even a logical {ok:false} from our own backend — that's not a transport failure, don't retry it
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (err.name === "AbortError") {
+        // Note: aborting here only stops the client from waiting — Apps
+        // Script may still finish executing server-side. Retrying a
+        // read-only action after its own timeout is safe regardless.
+        lastErr = new Error("Request timed out — check your connection (or try disabling browser extensions) and try again.");
+      } else {
+        lastErr = err;
+      }
     }
-    throw err;
-  } finally {
-    clearTimeout(timeoutId);
   }
-  if (!res.ok) throw new Error("Network error: " + res.status);
-  return res.json();
+  throw lastErr;
 }
+
 
 /* ============================================================
    Google Sign-In
@@ -492,9 +537,7 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
   setStatus(statusEl, "");
   clearButtonLoading(submitBtn);
   showScreen("screenVault");
-  loadFileList();
-  loadDependents();
-  loadMemberOrderPreference();
+  loadInitialVaultData();
 });
 
 /* ============================================================
@@ -567,28 +610,6 @@ populateIdTypeOptions("official"); // initial state matches the tab marked activ
 let dependents = []; // only MY dependents — [{ name, addedAt }]
 let myDependentNames = new Set(); // same data, as a Set, for quick lookups (delete-menu gating)
 
-async function loadDependents() {
-  try {
-    const res = await callBackend("listDependents", { idToken });
-    if (res.ok) {
-      dependents = res.dependents;
-      myDependentNames = new Set(dependents.map(d => d.name));
-      populateSubjectSelect();
-      // Same reasoning as loadMemberOrderPreference — only re-render if
-      // the first real render already happened, otherwise skip (avoids
-      // a premature empty-state flash; loadFileList's own upcoming
-      // render will pick this up regardless). Needed here too since
-      // myDependentNames affects whether the delete menu shows on a
-      // guardian-owned document's card.
-      if (fileListLoadedOnce) renderFileList();
-    } else {
-      console.warn("listDependents failed:", res.error || "unknown backend error");
-    }
-  } catch (err) {
-    // Non-fatal — the dropdown just won't offer any dependents yet;
-    // this is set up entirely by the admin, directly in the sheet.
-  }
-}
 
 function populateSubjectSelect(selectedName) {
   const select = document.getElementById("subjectSelect");
@@ -794,31 +815,11 @@ function subjectDisplayNameOf(f) {
    with an optional PERSONAL override. Stored on the backend, keyed to
    the caller's own verified email, so it follows the person across
    devices — same as everything else in this app. Loaded once per
-   session into memberOrderPreference (see loadMemberOrderPreference,
-   called alongside loadDependents), then read synchronously here.
+   session as part of loadInitialVaultData(), then read synchronously
+   here.
    ------------------------------------------------------------ */
 let memberOrderPreference = []; // cached in-memory after loading from the backend once per session
 
-async function loadMemberOrderPreference() {
-  try {
-    const res = await callBackend("getMemberOrderPreference", { idToken });
-    if (res.ok) {
-      memberOrderPreference = Array.isArray(res.order) ? res.order : [];
-      // Only re-render if loadFileList's own first render already
-      // happened — otherwise allFiles is still empty and rendering now
-      // would flash a false "you haven't uploaded any documents yet"
-      // before the real data arrives. If loadFileList hasn't rendered
-      // yet, its own upcoming render will correctly pick up this
-      // already-updated preference regardless, no separate call needed.
-      if (fileListLoadedOnce) {
-        populateMemberFilter();
-        renderFileList();
-      }
-    }
-  } catch (err) {
-    // Non-fatal — falls back to the default order for this session.
-  }
-}
 
 async function saveMemberOrderPreference(orderedKeys) {
   memberOrderPreference = orderedKeys; // apply locally right away, don't wait on the network
@@ -906,12 +907,43 @@ async function loadFileList() {
   }
 }
 
+// Used specifically for the initial load right after unlock — combines
+// what used to be three separate parallel calls (listFiles,
+// listDependents, getMemberOrderPreference) into one round-trip. Same
+// total work, but fewer chances to land on a slow request given this
+// backend's measured latency variance. Since everything arrives together
+// now, there's no race to guard against (unlike the old three-parallel-
+// calls version) — just set all the state, then render once.
+async function loadInitialVaultData() {
+  const listStatus = document.getElementById("listStatus");
+  setLoadingStatus(listStatus, "Loading…");
+  try {
+    const res = await callBackend("getInitialVaultData", { idToken });
+    if (!res.ok) {
+      showListLoadError(listStatus, "Couldn't load documents.", loadInitialVaultData);
+      return;
+    }
+    fileListLoadFailed = false;
+    fileListLoadedOnce = true;
+    allFiles = res.files;
+    dependents = res.dependents;
+    myDependentNames = new Set(dependents.map(d => d.name));
+    memberOrderPreference = Array.isArray(res.order) ? res.order : [];
+    populateSubjectSelect();
+    populateMemberFilter();
+    renderFileList();
+  } catch (err) {
+    showListLoadError(listStatus, err.message || "Couldn't reach the vault backend.", loadInitialVaultData);
+  }
+}
+
+
 // Shows a load failure with a "Retry" link, and remembers the failure so
 // it can be retried automatically the next time the app becomes visible
 // again — without this, the message just sits there forever, since
 // nothing else ever touches listStatus unless another load happens to
 // succeed on its own.
-function showListLoadError(el, msg) {
+function showListLoadError(el, msg, retryFn) {
   fileListLoadFailed = true;
   el.textContent = "";
   el.className = "status error";
@@ -920,7 +952,7 @@ function showListLoadError(el, msg) {
   retryBtn.type = "button";
   retryBtn.className = "link-btn";
   retryBtn.textContent = "Retry";
-  retryBtn.addEventListener("click", () => loadFileList());
+  retryBtn.addEventListener("click", () => (retryFn || loadFileList)());
   el.appendChild(retryBtn);
 }
 
@@ -1236,11 +1268,19 @@ function buildFileCard(meta) {
     if (decryptPromise) return decryptPromise; // covers both "already decrypted" and "decrypt in progress"
     decryptPromise = (async () => {
       const res = await callBackend("getFile", { idToken, driveFileId: meta.driveFileId });
-      if (!res.ok) throw new Error(res.error || "fetch failed");
-      const plainBytes = await decryptBytes(
-        base64ToBytes(res.ciphertextBase64),
-        base64ToBytes(meta.ivBase64)
-      );
+      if (!res.ok) throw new Error(res.error || "Couldn't fetch this document — try again.");
+      let plainBytes;
+      try {
+        plainBytes = await decryptBytes(
+          base64ToBytes(res.ciphertextBase64),
+          base64ToBytes(meta.ivBase64)
+        );
+      } catch (err) {
+        // Only a genuine decryption failure (wrong key, corrupted/tampered
+        // ciphertext) reaches here — network/timeout errors above already
+        // threw their own accurate message and never get this one.
+        throw new Error("Couldn't decrypt this file — check the passphrase.");
+      }
       decryptedBlob = new Blob([plainBytes], { type: meta.mimetype || "image/jpeg" });
       decryptedUrl = URL.createObjectURL(decryptedBlob);
       return decryptedBlob;
@@ -1269,16 +1309,16 @@ function buildFileCard(meta) {
       } else {
         window.open(decryptedUrl, "_blank");
       }
-    } catch {
+    } catch (err) {
       if (tab) tab.close();
-      await customAlert("Couldn't decrypt this file — check the passphrase.");
+      await customAlert((err && err.message) || "Couldn't decrypt this file — check the passphrase.");
     } finally {
       clearButtonLoading(viewBtn);
     }
   });
 
   downloadBtn.addEventListener("click", async () => {
-    const filenameBase = (meta.idType || "id-document").replace(/\s+/g, "-").toLowerCase();
+    const filenameBase = filenameBaseFor(meta);
     // iOS Safari ignores the `download` attribute on blob URLs — it just
     // navigates to the file instead of saving it. So on iOS we open the
     // file (same synchronous-tab trick as View) and let the person use
@@ -1301,9 +1341,9 @@ function buildFileCard(meta) {
         a.download = `${filenameBase}.${ext}`;
         a.click();
       }
-    } catch {
+    } catch (err) {
       if (tab) tab.close();
-      await customAlert("Couldn't decrypt this file — check the passphrase.");
+      await customAlert((err && err.message) || "Couldn't decrypt this file — check the passphrase.");
     } finally {
       clearButtonLoading(downloadBtn);
     }
@@ -1314,13 +1354,14 @@ function buildFileCard(meta) {
     try {
       const blob = await ensureDecrypted();
       const ext = extFromMimetype(meta.mimetype);
-      const fileForShare = new File([blob], `id-document.${ext}`, { type: blob.type });
+      const filenameBase = filenameBaseFor(meta);
+      const fileForShare = new File([blob], `${filenameBase}.${ext}`, { type: blob.type });
       if (navigator.canShare && navigator.canShare({ files: [fileForShare] })) {
-        await navigator.share({ files: [fileForShare], title: "ID document" });
+        await navigator.share({ files: [fileForShare], title: meta.idType || "ID document" });
       } else {
         const a = document.createElement("a");
         a.href = decryptedUrl;
-        a.download = `id-document.${ext}`;
+        a.download = `${filenameBase}.${ext}`;
         a.click();
       }
     } catch (err) {
@@ -1328,7 +1369,7 @@ function buildFileCard(meta) {
         // Person just canceled the native share sheet — not a real error.
         return;
       }
-      await customAlert("Couldn't decrypt this file — check the passphrase.");
+      await customAlert((err && err.message) || "Couldn't decrypt this file — check the passphrase.");
     } finally {
       clearButtonLoading(shareBtn);
     }
@@ -1388,9 +1429,7 @@ function buildFileCard(meta) {
         "raw", base64ToBytes(savedKeyBase64), { name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]
       );
       showScreen("screenVault");
-      loadFileList();
-      loadDependents();
-      loadMemberOrderPreference();
+      loadInitialVaultData();
       return;
     } catch {
       clearPersistedVaultKey(); // fall through to the passphrase screen below
