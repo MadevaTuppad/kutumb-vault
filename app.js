@@ -569,7 +569,6 @@ document.getElementById("passphraseForm").addEventListener("submit", async (e) =
   const submitBtn = e.target.querySelector('button[type="submit"]');
   const passphrase = document.getElementById("passphraseInput").value;
   document.getElementById("passphraseInput").value = "";
-  setLoadingStatus(statusEl, "Unlocking…");
   setButtonLoading(submitBtn, "Unlocking…");
 
   let candidateKey;
@@ -1469,7 +1468,12 @@ function buildFileCard(meta) {
         a.href = decryptedUrl;
         a.download = `${filenameBase}.${ext}`;
         a.click();
-        showConfirmToast(`Downloaded ${filenameBase}.${ext}`);
+        // Deliberately delayed — if this is a repeat download, Chrome
+        // shows its own native "Download again?" dialog, which we have
+        // no way to detect or wait for from JavaScript. This gives that
+        // dialog a moment to appear first, rather than both trying to
+        // show at the exact same instant.
+        setTimeout(() => showConfirmToast(`Downloaded ${filenameBase}.${ext}`), 600);
       }
     } catch (err) {
       const msg = (err && err.message) || "Couldn't decrypt this file — check the passphrase.";
