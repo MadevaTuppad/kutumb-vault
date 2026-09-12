@@ -73,15 +73,33 @@ function bytesToBase64(bytes) {
   }
   return btoa(bin);
 }
+const statusClearTimeouts = new WeakMap(); // per-element, so clearing one status area never affects another
 function setStatus(el, msg, kind) {
   el.textContent = msg || "";
   el.className = "status" + (kind ? " " + kind : "");
+  const existing = statusClearTimeouts.get(el);
+  if (existing) clearTimeout(existing);
+  // Only success messages auto-clear — errors often carry a Retry link
+  // and should stay until the person actually deals with them, not
+  // disappear out from under them.
+  if (kind === "success" && msg) {
+    const timeoutId = setTimeout(() => {
+      el.textContent = "";
+      el.className = "status";
+      statusClearTimeouts.delete(el);
+    }, 4000);
+    statusClearTimeouts.set(el, timeoutId);
+  } else {
+    statusClearTimeouts.delete(el);
+  }
 }
 // Same as setStatus, but prepends a small spinner — used for transient
 // "in progress" messages (checking access, unlocking, loading) so it's
 // visually obvious something is happening, not just a text change that's
 // easy to miss.
 function setLoadingStatus(el, msg) {
+  const existing = statusClearTimeouts.get(el);
+  if (existing) { clearTimeout(existing); statusClearTimeouts.delete(el); }
   el.textContent = "";
   el.className = "status";
   const spinner = document.createElement("span");
@@ -196,6 +214,10 @@ function isIOS() {
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); // iPadOS reports as Mac
 }
 
+function isAndroid() {
+  return /Android/.test(navigator.userAgent);
+}
+
 function extFromMimetype(mimetype) {
   const mt = (mimetype || "").toLowerCase();
   if (mt.includes("pdf")) return "pdf";
@@ -244,6 +266,67 @@ function showTabLoading(tab) {
     tab.document.close();
   } catch (err) {
     // Non-fatal — worst case it's just blank until navigation happens.
+  }
+}
+
+// Shown in the new tab itself, right before navigating to the actual
+// file — NOT on the original page, which the person has already
+// switched away from by this point and won't see. Auto-advances after
+// a brief pause (long enough to actually read it), but also offers an
+// immediate "Continue now" for anyone who's already read it and wants
+// to move on faster. fileUrl is always a browser-generated blob: URL,
+// never user input, so it's safe to embed directly without escaping.
+function showTabSaveTip(tab, message, fileUrl) {
+  if (!tab) return;
+  try {
+    tab.document.write(
+      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+      '<title>Kutumb Vault</title>' +
+      '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;' +
+      'background:#12181f;color:#ede8de;font-family:system-ui,sans-serif;font-size:17px;' +
+      'line-height:1.5;text-align:center;padding:32px;box-sizing:border-box;}' +
+      '.wrap{max-width:340px;}' +
+      '.wrap strong{color:#c9a227;}' +
+      'a.cta{display:inline-block;margin-top:20px;color:#8b93a1;font-size:14px;' +
+      'text-decoration:underline;}</style></head>' +
+      '<body><div class="wrap">' + message +
+      '<br><a class="cta" href="' + fileUrl + '">Continue now →</a></div>' +
+      '<script>setTimeout(function(){ window.location.href = "' + fileUrl + '"; }, 2500);</script>' +
+      '</body></html>'
+    );
+    tab.document.close();
+  } catch (err) {
+    // Non-fatal — falls through to the caller's own direct navigation.
+  }
+}
+
+// Shown in the new tab itself on failure, instead of silently closing
+// it while an alert pops up back on the original page — the person's
+// attention is already on this tab by this point, so that's where the
+// explanation needs to be, not somewhere they've already left. message
+// goes through textContent (not string-built HTML) since it can come
+// from several different sources (timeout, network, decrypt failure)
+// and shouldn't be assumed safe to concatenate directly.
+function showTabError(tab, message) {
+  if (!tab) return;
+  try {
+    tab.document.write(
+      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+      '<title>Kutumb Vault</title>' +
+      '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;' +
+      'background:#12181f;color:#ede8de;font-family:system-ui,sans-serif;font-size:16px;' +
+      'line-height:1.5;text-align:center;padding:32px;box-sizing:border-box;}' +
+      '.wrap{max-width:320px;}' +
+      '.wrap .err{color:#c0574b;font-weight:600;margin-bottom:8px;}</style></head>' +
+      '<body><div class="wrap"><div class="err">Couldn\'t open this document</div><div id="msg"></div></div></body></html>'
+    );
+    tab.document.close();
+    tab.document.getElementById("msg").textContent = message;
+  } catch (err) {
+    // Non-fatal — worst case the tab is left showing its last state
+    // (the "Decrypting..." spinner), which the person can just close.
   }
 }
 
@@ -950,6 +1033,8 @@ async function loadInitialVaultData() {
 // nothing else ever touches listStatus unless another load happens to
 // succeed on its own.
 function showListLoadError(el, msg, retryFn) {
+  const existing = statusClearTimeouts.get(el);
+  if (existing) { clearTimeout(existing); statusClearTimeouts.delete(el); }
   fileListLoadFailed = true;
   el.textContent = "";
   el.className = "status error";
@@ -1302,10 +1387,11 @@ function buildFileCard(meta) {
   });
 
   viewBtn.addEventListener("click", async () => {
-    // iOS Safari's popup blocker only allows window.open() when called
-    // synchronously from the click — not after an awaited decrypt. So we
-    // open a blank tab right away and fill in its location once ready.
-    const tab = isIOS() ? window.open("", "_blank") : null;
+    // Popup blockers (iOS Safari and Android Chrome both) only allow
+    // window.open() when called synchronously from the click — not
+    // after an awaited decrypt. So we open a blank tab right away and
+    // fill in its location once ready, on both platforms.
+    const tab = (isIOS() || isAndroid()) ? window.open("", "_blank") : null;
     showTabLoading(tab);
     setButtonLoading(viewBtn, "Opening…");
     try {
@@ -1316,8 +1402,12 @@ function buildFileCard(meta) {
         window.open(decryptedUrl, "_blank");
       }
     } catch (err) {
-      if (tab) tab.close();
-      await customAlert((err && err.message) || "Couldn't decrypt this file — check the passphrase.");
+      const msg = (err && err.message) || "Couldn't decrypt this file — check the passphrase.";
+      if (tab) {
+        showTabError(tab, msg);
+      } else {
+        await customAlert(msg);
+      }
     } finally {
       clearButtonLoading(viewBtn);
     }
@@ -1325,22 +1415,28 @@ function buildFileCard(meta) {
 
   downloadBtn.addEventListener("click", async () => {
     const filenameBase = filenameBaseFor(meta);
-    // iOS Safari ignores the `download` attribute on blob URLs — it just
-    // navigates to the file instead of saving it. So on iOS we open the
-    // file (same synchronous-tab trick as View) and let the person use
-    // the native share sheet's "Save to Files" / "Save Image" action.
-    // Android Chrome honors `download` correctly, so it keeps the
-    // straightforward anchor-click approach.
-    const tab = isIOS() ? window.open("", "_blank") : null;
+    // iOS Safari ignores the `download` attribute on blob URLs entirely —
+    // it just navigates to the file instead of saving it. Android
+    // Chrome's own built-in PDF viewer has a similar issue: it can
+    // intercept a PDF blob URL and just display it, ignoring `download`,
+    // even though this same approach does work reliably for images.
+    // Since most documents here are PDFs, both platforms get the same
+    // fix — open the file and let the browser's own native UI (share
+    // sheet on iOS, its own download control on Android) handle the
+    // actual save, rather than trusting the unreliable download attribute.
+    const useTab = isIOS() || isAndroid();
+    const tab = useTab ? window.open("", "_blank") : null;
     showTabLoading(tab);
     setButtonLoading(downloadBtn, "Downloading…");
     try {
       await ensureDecrypted();
       const ext = extFromMimetype(meta.mimetype);
       if (tab) {
-        tab.location.href = decryptedUrl;
-        setStatus(document.getElementById("listStatus"),
-          "Opened the file — use the share icon to save it to Files/Photos.", "success");
+        const guidance = isIOS()
+          ? 'Tap the <strong>Share</strong> icon, then "Save to Files" or "Save Image", to keep this document.'
+          : "Use your browser's download option to save this document to your device.";
+        showTabSaveTip(tab, guidance, decryptedUrl);
+        setStatus(document.getElementById("listStatus"), "Opened for saving.", "success");
       } else {
         const a = document.createElement("a");
         a.href = decryptedUrl;
@@ -1349,8 +1445,12 @@ function buildFileCard(meta) {
         setStatus(document.getElementById("listStatus"), `Downloaded ${filenameBase}.${ext}`, "success");
       }
     } catch (err) {
-      if (tab) tab.close();
-      await customAlert((err && err.message) || "Couldn't decrypt this file — check the passphrase.");
+      const msg = (err && err.message) || "Couldn't decrypt this file — check the passphrase.";
+      if (tab) {
+        showTabError(tab, msg);
+      } else {
+        await customAlert(msg);
+      }
     } finally {
       clearButtonLoading(downloadBtn);
     }
