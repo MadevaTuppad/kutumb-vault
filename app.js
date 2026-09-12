@@ -214,10 +214,6 @@ function isIOS() {
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); // iPadOS reports as Mac
 }
 
-function isAndroid() {
-  return /Android/.test(navigator.userAgent);
-}
-
 function extFromMimetype(mimetype) {
   const mt = (mimetype || "").toLowerCase();
   if (mt.includes("pdf")) return "pdf";
@@ -851,6 +847,25 @@ function showUndoToast(meta) {
 function hideUndoToast() {
   document.getElementById("undoToast").classList.add("hidden");
 }
+
+// Fixed-position confirmation toast — always visible regardless of
+// scroll position, unlike writing to listStatus (which sits below the
+// entire document list, easy to end up scrolled far out of view on a
+// long list). Simple dedicated timer since this is one single element,
+// not shared across multiple different status areas the way listStatus
+// is (see statusClearTimeouts for that more general case).
+let confirmToastTimeoutId = null;
+function showConfirmToast(message) {
+  if (confirmToastTimeoutId) clearTimeout(confirmToastTimeoutId);
+  const toast = document.getElementById("confirmToast");
+  document.getElementById("confirmToastMessage").textContent = message;
+  toast.classList.remove("hidden");
+  confirmToastTimeoutId = setTimeout(() => {
+    toast.classList.add("hidden");
+    confirmToastTimeoutId = null;
+  }, 4000);
+}
+
 function finalizePendingDelete() {
   if (!pendingDelete) return;
   const { meta } = pendingDelete;
@@ -1075,10 +1090,13 @@ function renderFileList() {
     filtered.sort((a, b) => (rank.get(subjectKeyOf(a)) ?? 999) - (rank.get(subjectKeyOf(b)) ?? 999));
   }
 
-  // Release resources held by the cards about to be discarded: revoke any
-  // decrypted blob URL, and stop observing thumbnails that never scrolled
-  // into view (otherwise IntersectionObserver keeps a reference to the
-  // detached element forever, leaking memory across repeated re-renders).
+  // Release resources held by the cards about to be discarded: revoke
+  // any decrypted blob URL (see cardCleanups below), and cancel a
+  // pending highlight-removal timer if one is still running — without
+  // this, the timer's closure keeps the about-to-be-discarded card
+  // element alive in memory for its remaining duration instead of
+  // letting it be garbage collected right away.
+  if (highlightTimeoutId) { clearTimeout(highlightTimeoutId); highlightTimeoutId = null; }
   for (const oldCard of listEl.children) {
     const cleanup = cardCleanups.get(oldCard);
     if (cleanup) cleanup();
@@ -1183,7 +1201,7 @@ document.getElementById("saveMemberOrderBtn").addEventListener("click", async (e
   document.getElementById("memberOrderPanel").classList.add("hidden");
   populateMemberFilter();
   renderFileList();
-  setStatus(document.getElementById("listStatus"), "Order saved.", "success");
+  showConfirmToast("Order saved.");
 });
 
 document.getElementById("resetMemberOrderBtn").addEventListener("click", () => {
@@ -1229,13 +1247,18 @@ document.getElementById("tabFamily").addEventListener("click", () => setActiveTa
 // person's group rather than obviously at the top of a flat list. If
 // the current tab/filter doesn't happen to show this document, this
 // silently does nothing rather than force-switching the person's view.
+let highlightTimeoutId = null; // cleared in renderFileList if a re-render discards the card before this fires
 function highlightNewCard(driveFileId) {
   if (!driveFileId) return;
   const card = document.querySelector(`.file-card[data-drive-file-id="${CSS.escape(driveFileId)}"]`);
   if (!card) return;
   card.scrollIntoView({ behavior: "smooth", block: "center" });
   card.classList.add("file-card-highlight");
-  setTimeout(() => card.classList.remove("file-card-highlight"), 2000);
+  if (highlightTimeoutId) clearTimeout(highlightTimeoutId);
+  highlightTimeoutId = setTimeout(() => {
+    card.classList.remove("file-card-highlight");
+    highlightTimeoutId = null;
+  }, 2000);
 }
 
 function buildFileCard(meta) {
@@ -1387,11 +1410,17 @@ function buildFileCard(meta) {
   });
 
   viewBtn.addEventListener("click", async () => {
-    // Popup blockers (iOS Safari and Android Chrome both) only allow
-    // window.open() when called synchronously from the click — not
-    // after an awaited decrypt. So we open a blank tab right away and
-    // fill in its location once ready, on both platforms.
-    const tab = (isIOS() || isAndroid()) ? window.open("", "_blank") : null;
+    // iOS Safari's popup blocker only allows window.open() when called
+    // synchronously from the click — not after an awaited decrypt. So we
+    // open a blank tab right away and fill in its location once ready.
+    // Android intentionally does NOT use this tab trick — reverted per
+    // real family feedback preferring the simpler, original direct
+    // behavior. Known tradeoff: Android Chrome's popup blocker can in
+    // principle also block a delayed window.open() like the one below,
+    // same category of risk iOS has — this is a conscious choice to
+    // accept that theoretical risk in exchange for the simpler
+    // experience people actually preferred in practice.
+    const tab = isIOS() ? window.open("", "_blank") : null;
     showTabLoading(tab);
     setButtonLoading(viewBtn, "Opening…");
     try {
@@ -1416,33 +1445,31 @@ function buildFileCard(meta) {
   downloadBtn.addEventListener("click", async () => {
     const filenameBase = filenameBaseFor(meta);
     // iOS Safari ignores the `download` attribute on blob URLs entirely —
-    // it just navigates to the file instead of saving it. Android
-    // Chrome's own built-in PDF viewer has a similar issue: it can
-    // intercept a PDF blob URL and just display it, ignoring `download`,
-    // even though this same approach does work reliably for images.
-    // Since most documents here are PDFs, both platforms get the same
-    // fix — open the file and let the browser's own native UI (share
-    // sheet on iOS, its own download control on Android) handle the
-    // actual save, rather than trusting the unreliable download attribute.
-    const useTab = isIOS() || isAndroid();
-    const tab = useTab ? window.open("", "_blank") : null;
+    // it just navigates to the file instead of saving it, so iOS still
+    // needs the tab-based workaround. Android intentionally does NOT —
+    // reverted per real family feedback preferring the simpler, original
+    // silent-download experience. Known tradeoff, accepted deliberately:
+    // Android Chrome's built-in PDF viewer can in principle still
+    // intercept a PDF blob URL here and just display it instead of
+    // saving, for PDFs specifically (images are unaffected). That risk
+    // is being knowingly traded for the simpler behavior people actually
+    // preferred in practice.
+    const tab = isIOS() ? window.open("", "_blank") : null;
     showTabLoading(tab);
     setButtonLoading(downloadBtn, "Downloading…");
     try {
       await ensureDecrypted();
       const ext = extFromMimetype(meta.mimetype);
       if (tab) {
-        const guidance = isIOS()
-          ? 'Tap the <strong>Share</strong> icon, then "Save to Files" or "Save Image", to keep this document.'
-          : "Use your browser's download option to save this document to your device.";
+        const guidance = 'Tap the <strong>Share</strong> icon, then "Save to Files" or "Save Image", to keep this document.';
         showTabSaveTip(tab, guidance, decryptedUrl);
-        setStatus(document.getElementById("listStatus"), "Opened for saving.", "success");
+        showConfirmToast("Opened for saving.");
       } else {
         const a = document.createElement("a");
         a.href = decryptedUrl;
         a.download = `${filenameBase}.${ext}`;
         a.click();
-        setStatus(document.getElementById("listStatus"), `Downloaded ${filenameBase}.${ext}`, "success");
+        showConfirmToast(`Downloaded ${filenameBase}.${ext}`);
       }
     } catch (err) {
       const msg = (err && err.message) || "Couldn't decrypt this file — check the passphrase.";

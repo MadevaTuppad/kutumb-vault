@@ -313,6 +313,13 @@ input:focus{outline:2px solid var(--brass-dim);outline-offset:1px;}
      bottom-right zone on mobile — see .upload-cta's own media query. */
   .undo-toast{bottom:calc(84px + env(safe-area-inset-bottom));}
 }
+/* Sits above the undo-toast's position — if a delete's undo window is
+   still open when a download/reorder confirmation fires, they stack
+   cleanly instead of overlapping each other. */
+#confirmToast{bottom:90px; justify-content:center;}
+@media (max-width:640px){
+  #confirmToast{bottom:calc(154px + env(safe-area-inset-bottom));}
+}
 
 .modal-overlay{
   position:fixed;inset:0;background:rgba(0,0,0,.6);
