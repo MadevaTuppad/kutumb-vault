@@ -1468,12 +1468,6 @@ function buildFileCard(meta) {
         a.href = decryptedUrl;
         a.download = `${filenameBase}.${ext}`;
         a.click();
-        // Deliberately delayed — if this is a repeat download, Chrome
-        // shows its own native "Download again?" dialog, which we have
-        // no way to detect or wait for from JavaScript. This gives that
-        // dialog a moment to appear first, rather than both trying to
-        // show at the exact same instant.
-        setTimeout(() => showConfirmToast(`Downloaded ${filenameBase}.${ext}`), 600);
       }
     } catch (err) {
       const msg = (err && err.message) || "Couldn't decrypt this file — check the passphrase.";
