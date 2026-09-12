@@ -8,6 +8,13 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Kutumb Vault">
 <title>Kutumb Vault</title>
+<!-- Inline, not in styles.css — this needs to be available at the very
+     first paint, before either external stylesheet below has loaded.
+     Without it, a brief white flash of the browser's default background
+     shows on any moment of network latency (exactly the kind of
+     mobile-connection variability this whole build has had to account
+     for elsewhere), until the fonts/styles.css requests finish. -->
+<style>html,body{background:#12181f;}</style>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="manifest" href="manifest.json">
