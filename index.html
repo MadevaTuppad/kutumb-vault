@@ -1,179 +1,1577 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#12181f">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Kutumb Vault">
-<title>Kutumb Vault</title>
-<!-- Inline, not in styles.css — this needs to be available at the very
-     first paint, before either external stylesheet below has loaded.
-     Without it, a brief white flash of the browser's default background
-     shows on any moment of network latency (exactly the kind of
-     mobile-connection variability this whole build has had to account
-     for elsewhere), until the fonts/styles.css requests finish. -->
-<style>html,body{background:#12181f;}</style>
-<link rel="icon" type="image/svg+xml" href="favicon.svg">
-<link rel="apple-touch-icon" href="apple-touch-icon.png">
-<link rel="manifest" href="manifest.json">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css">
-</head>
-<body>
+/* ============================================================
+   Family ID Vault — frontend logic
+   ------------------------------------------------------------
+   SET THESE THREE VALUES BEFORE DEPLOYING:
+   ============================================================ */
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbximmaznIUcuFJh5lklZ5Rls10qx3e3BfzDhfl7IcGVLXyat7rasaFr0OAEQAdWfGD5WA/exec";
+// A fixed salt for this deployment. Generate your own random 16 bytes
+// once (see README) and hardcode them here. This value is NOT secret,
+// but must stay the same forever for this vault (changing it means
+// nobody can decrypt previously-uploaded files).
+const SALT_BASE64 = "UHh8Nu4Ou0vh22k22/HVUQ==";
+const PBKDF2_ITERATIONS = 250000;
+// Must exactly match CHECK_PLAINTEXT in generate-passphrase-check.html.
+const CHECK_PLAINTEXT = "kutumb-vault-check-v1";
 
-<div class="wrap">
+/* ============================================================
+   State
+   ------------------------------------------------------------
+   idToken/currentUser/vaultKey optionally survive a page refresh via
+   sessionStorage (see persistAuth / restoreSessionOnLoad below) — this
+   is a deliberate convenience trade-off. sessionStorage never touches
+   the network, so it doesn't affect man-in-the-middle exposure, but it IS readable by
+   any JS running in this origin (e.g. an XSS bug) or by anyone with
+   physical access to an unlocked device's DevTools. It's cleared the
+   moment the tab is actually closed (unlike localStorage).
+   ============================================================ */
+let idToken = null;
+let currentUser = null; // { email, name }
+let vaultKey = null;    // CryptoKey, only exists after passphrase unlock
 
-  <header class="topbar">
-    <div class="brand">
-      <svg class="mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
-        <circle cx="12" cy="9" r="5.2" fill="none" stroke="currentColor" stroke-width="1.6"/>
-        <rect x="10.6" y="12.5" width="2.8" height="6" rx="1" fill="currentColor"/>
-      </svg>
-      <span>Kutumb Vault</span>
-    </div>
-    <div id="userBadge" class="user-badge hidden">
-      <span id="userName"></span>
-      <button id="lockBtn" class="link-btn">Lock vault</button>
-      <button id="signOutBtn" class="link-btn link-btn-danger">Sign out</button>
-    </div>
-  </header>
+/* ------------------------------------------------------------
+   Session persistence (sessionStorage — cleared when the tab closes)
+   ------------------------------------------------------------ */
+const SESSION_AUTH_KEY = "kutumbVaultAuth";  // { idToken, currentUser } — survives Lock vault
+const SESSION_VAULTKEY_KEY = "kutumbVaultKey"; // exported raw AES key, base64 — cleared by Lock vault
 
-  <!-- SCREEN 1: Sign in -->
-  <section id="screenSignIn" class="screen center-card">
-    <div class="card">
-      <h1>Unlock Kutumb Vault</h1>
-      <p class="muted">Sign in with the Google account your family added to the allow list.</p>
-      <p class="muted small">Open this link in Safari or Chrome directly &mdash; sign-in won't work inside an in-app browser (e.g. WhatsApp, Instagram, Gmail).</p>
-      <div id="g_id_onload"
-           data-client_id="1063516130206-mpm57j97700jaqtqgj6go7p6bnd75k87.apps.googleusercontent.com"
-           data-callback="handleCredentialResponse"
-           data-auto_prompt="false"
-           data-auto_select="false">
-      </div>
-      <div class="g_id_signin"
-           data-type="standard"
-           data-theme="filled_black"
-           data-size="large"
-           data-shape="pill"
-           data-text="signin_with">
-      </div>
-      <p id="signInStatus" class="status" aria-live="polite"></p>
-    </div>
-  </section>
+function persistAuth() {
+  try {
+    sessionStorage.setItem(SESSION_AUTH_KEY, JSON.stringify({ idToken, currentUser }));
+  } catch (err) {
+    // Non-fatal — worst case, the next refresh just asks to sign in again.
+  }
+}
+function clearPersistedAuth() {
+  try { sessionStorage.removeItem(SESSION_AUTH_KEY); } catch (err) {}
+}
+async function persistVaultKey() {
+  try {
+    const rawKey = await crypto.subtle.exportKey("raw", vaultKey);
+    sessionStorage.setItem(SESSION_VAULTKEY_KEY, bytesToBase64(new Uint8Array(rawKey)));
+  } catch (err) {
+    // Non-fatal — worst case, the next refresh just asks for the passphrase again.
+  }
+}
+function clearPersistedVaultKey() {
+  try { sessionStorage.removeItem(SESSION_VAULTKEY_KEY); } catch (err) {}
+}
 
-  <!-- SCREEN 2: Passphrase unlock -->
-  <section id="screenPassphrase" class="screen center-card hidden">
-    <div class="card">
-      <h1>Enter the family passphrase</h1>
-      <p class="muted">This unlocks the encryption key on this device only. It is never sent anywhere.</p>
-      <form id="passphraseForm">
-        <input type="password" id="passphraseInput" placeholder="Family passphrase" autocomplete="current-password" required>
-        <button type="submit" class="primary-btn">Unlock vault</button>
-      </form>
-      <p class="muted small">Your browser may offer to save this passphrase for faster unlocking next time. Since it's shared by the whole family, saving it will sync to your other signed-in devices too.</p>
-      <p id="passphraseStatus" class="status" aria-live="polite"></p>
-    </div>
-  </section>
+/* ============================================================
+   Small helpers
+   ============================================================ */
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+function bytesToBase64(bytes) {
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+const statusClearTimeouts = new WeakMap(); // per-element, so clearing one status area never affects another
+function setStatus(el, msg, kind) {
+  el.textContent = msg || "";
+  el.className = "status" + (kind ? " " + kind : "");
+  const existing = statusClearTimeouts.get(el);
+  if (existing) clearTimeout(existing);
+  // Only success messages auto-clear — errors often carry a Retry link
+  // and should stay until the person actually deals with them, not
+  // disappear out from under them.
+  if (kind === "success" && msg) {
+    const timeoutId = setTimeout(() => {
+      el.textContent = "";
+      el.className = "status";
+      statusClearTimeouts.delete(el);
+    }, 4000);
+    statusClearTimeouts.set(el, timeoutId);
+  } else {
+    statusClearTimeouts.delete(el);
+  }
+}
+// Same as setStatus, but prepends a small spinner — used for transient
+// "in progress" messages (checking access, unlocking, loading) so it's
+// visually obvious something is happening, not just a text change that's
+// easy to miss.
+function setLoadingStatus(el, msg) {
+  const existing = statusClearTimeouts.get(el);
+  if (existing) { clearTimeout(existing); statusClearTimeouts.delete(el); }
+  el.textContent = "";
+  el.className = "status";
+  const spinner = document.createElement("span");
+  spinner.className = "spinner";
+  el.appendChild(spinner);
+  el.appendChild(document.createTextNode(msg));
+}
+// Swaps a button into a disabled, spinner+label loading state, and back.
+// Used for View/Download/Share/Unlock, which previously gave zero
+// feedback between tap and the action completing.
+function setButtonLoading(btn, loadingText) {
+  if (btn.dataset.originalText === undefined) btn.dataset.originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "";
+  const spinner = document.createElement("span");
+  spinner.className = "spinner";
+  btn.appendChild(spinner);
+  btn.appendChild(document.createTextNode(loadingText));
+}
+function clearButtonLoading(btn) {
+  btn.disabled = false;
+  if (btn.dataset.originalText !== undefined) {
+    btn.textContent = btn.dataset.originalText;
+    delete btn.dataset.originalText;
+  }
+}
 
-  <!-- SCREEN 3: Dashboard (default landing after unlock) -->
-  <section id="screenVault" class="screen hidden">
-    <button id="openUploadBtn" class="primary-btn upload-cta">+ Upload new ID</button>
+// Drop-in replacements for confirm()/alert() that match the app's own
+// dark theme instead of a plain system dialog. Same calling shape
+// (returns a Promise the caller awaits) so each call site only needed
+// "confirm(...)" -> "await customConfirm(...)" and "alert(...)" ->
+// "await customAlert(...)", not a restructure.
+function customConfirm(message) {
+  return new Promise(resolve => {
+    const overlay = document.getElementById("customModalOverlay");
+    const cancelBtn = document.getElementById("customModalCancelBtn");
+    const confirmBtn = document.getElementById("customModalConfirmBtn");
+    const previouslyFocused = document.activeElement;
+    document.getElementById("customModalMessage").textContent = message;
+    cancelBtn.classList.remove("hidden");
+    confirmBtn.textContent = "OK";
+    overlay.classList.remove("hidden");
+    cancelBtn.focus(); // safer default focus for a destructive-action confirm
 
-    <h2 class="section-title">Stored documents</h2>
-    <div class="tab-row" role="tablist">
-      <button id="tabMine" class="tab-btn active" role="tab" aria-selected="true">My IDs</button>
-      <button id="tabFamily" class="tab-btn" role="tab" aria-selected="false">Family</button>
-    </div>
-    <div class="filter-row">
-      <select id="memberFilterSelect" class="hidden">
-        <option value="">All family members</option>
-      </select>
-      <select id="filterSelect">
-        <option value="">All document types</option>
-        <optgroup label="Official IDs">
-          <option value="Aadhaar">Aadhaar</option>
-          <option value="PAN">PAN</option>
-          <option value="Passport">Passport</option>
-          <option value="Driving Licence">Driving Licence</option>
-          <option value="Voter ID">Voter ID</option>
-        </optgroup>
-        <optgroup label="Other IDs">
-          <option value="Passport-size Photo">Passport-size Photo</option>
-          <option value="Gas Passbook">Gas Passbook</option>
-          <option value="Ration Card">Ration Card</option>
-          <option value="Birth Certificate">Birth Certificate</option>
-          <option value="Bank Passbook">Bank Passbook</option>
-          <option value="Insurance Policy">Insurance Policy</option>
-          <option value="Property Documents">Property Documents</option>
-          <option value="Other">Other</option>
-        </optgroup>
-      </select>
-    </div>
-    <button type="button" id="orderMembersBtn" class="link-btn hidden" style="display:block;margin-bottom:10px;">Order family members…</button>
-    <div id="memberOrderPanel" class="hidden">
-      <p class="muted small">Tap members in the order you want them to appear. Anyone left untapped goes after, in the default order (dependents first, then alphabetical). This is personal to your account and follows you across devices.</p>
-      <div id="memberOrderChips" class="member-order-chips"></div>
-      <div class="member-order-actions">
-        <button type="button" id="saveMemberOrderBtn" class="primary-btn">Save order</button>
-        <button type="button" id="resetMemberOrderBtn" class="link-btn">Reset to default</button>
-        <button type="button" id="cancelMemberOrderBtn" class="link-btn">Cancel</button>
-      </div>
-    </div>
-    <div id="fileList" class="file-list"></div>
-    <p id="listStatus" class="status" aria-live="polite"></p>
-  </section>
+    function onKeydown(e) {
+      if (e.key === "Escape") { cleanup(false); return; }
+      if (e.key !== "Tab") return;
+      e.preventDefault(); // only two buttons — a minimal trap between them
+      (document.activeElement === cancelBtn ? confirmBtn : cancelBtn).focus();
+    }
+    function cleanup(result) {
+      overlay.classList.add("hidden");
+      cancelBtn.removeEventListener("click", onCancel);
+      confirmBtn.removeEventListener("click", onConfirm);
+      document.removeEventListener("keydown", onKeydown);
+      if (previouslyFocused && previouslyFocused.focus) previouslyFocused.focus();
+      resolve(result);
+    }
+    function onCancel() { cleanup(false); }
+    function onConfirm() { cleanup(true); }
+    cancelBtn.addEventListener("click", onCancel);
+    confirmBtn.addEventListener("click", onConfirm);
+    document.addEventListener("keydown", onKeydown);
+  });
+}
+function customAlert(message) {
+  return new Promise(resolve => {
+    const overlay = document.getElementById("customModalOverlay");
+    const cancelBtn = document.getElementById("customModalCancelBtn");
+    const confirmBtn = document.getElementById("customModalConfirmBtn");
+    const previouslyFocused = document.activeElement;
+    document.getElementById("customModalMessage").textContent = message;
+    cancelBtn.classList.add("hidden"); // alert only ever needs the one button
+    confirmBtn.textContent = "OK";
+    overlay.classList.remove("hidden");
+    confirmBtn.focus();
 
-  <!-- SCREEN 4: Upload (separate page, reached via the dashboard button) -->
-  <section id="screenUpload" class="screen hidden">
-    <button id="backToVaultBtn" class="link-btn back-btn">&larr; Back to documents</button>
-    <div class="upload-panel">
-      <label for="subjectSelect" class="muted small" style="display:block;margin-bottom:6px;">Whose document is this?</label>
-      <select id="subjectSelect">
-        <option value="">Myself</option>
-      </select>
-      <label class="muted small" style="display:block;margin-bottom:6px;">Document category</label>
-      <div class="tab-row" id="idCategoryTabs" role="tablist">
-        <button type="button" id="idCatOfficial" class="tab-btn active" role="tab" aria-selected="true" data-category="official">Official IDs</button>
-        <button type="button" id="idCatOther" class="tab-btn" role="tab" aria-selected="false" data-category="other">Other IDs</button>
-      </div>
-      <label for="idTypeSelect" class="muted small" style="display:block;margin:14px 0 6px;">Document type</label>
-      <select id="idTypeSelect" required></select>
-      <label for="fileInput" class="upload-drop">
-        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M12 16V4M12 4L7 9M12 4l5 5M5 20h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <span>Take a photo, or choose an image or PDF</span>
-        <span class="muted small">Encrypted on this device before it ever leaves</span>
-      </label>
-      <input type="file" id="fileInput" accept="image/*,application/pdf" class="visually-hidden">
-      <p id="uploadStatus" class="status" aria-live="polite"></p>
-    </div>
-  </section>
+    function onKeydown(e) {
+      if (e.key === "Escape") { cleanup(); return; }
+      if (e.key === "Tab") { e.preventDefault(); confirmBtn.focus(); } // only one button — trap on it
+    }
+    function cleanup() {
+      overlay.classList.add("hidden");
+      confirmBtn.removeEventListener("click", onConfirm);
+      document.removeEventListener("keydown", onKeydown);
+      if (previouslyFocused && previouslyFocused.focus) previouslyFocused.focus();
+      resolve();
+    }
+    function onConfirm() { cleanup(); }
+    confirmBtn.addEventListener("click", onConfirm);
+    document.addEventListener("keydown", onKeydown);
+  });
+}
 
-</div>
+function showScreen(id) {
+  ["screenSignIn", "screenPassphrase", "screenVault", "screenUpload"].forEach(s => {
+    document.getElementById(s).classList.toggle("hidden", s !== id);
+  });
+  // offsetHeight below forces a synchronous layout read, which is safe
+  // and accurate immediately after the classList change above — the
+  // browser flushes layout on demand for a read like this, no need to
+  // wait a tick. Only relevant once #screenVault is no longer hidden.
+  if (id === "screenVault") measureTabRowHeight();
+}
 
-<div id="undoToast" class="undo-toast hidden">
-  <span id="undoToastMessage"></span>
-  <button type="button" id="undoDeleteBtn" class="link-btn">Undo</button>
-</div>
+/* ------------------------------------------------------------
+   iOS Safari needs different handling than Android Chrome for
+   opening/downloading blob URLs — see comments at each call site.
+   ------------------------------------------------------------ */
+function isIOS() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); // iPadOS reports as Mac
+}
 
-<div id="confirmToast" class="undo-toast hidden">
-  <span id="confirmToastMessage"></span>
-</div>
+function extFromMimetype(mimetype) {
+  const mt = (mimetype || "").toLowerCase();
+  if (mt.includes("pdf")) return "pdf";
+  if (mt.includes("png")) return "png";
+  if (mt.includes("webp")) return "webp";
+  if (mt.includes("heic") || mt.includes("heif")) return "heic";
+  return "jpg";
+}
+// Broader than just replacing spaces — a person's name is free-form text
+// (unlike idType, always one of a small fixed safe list), so this strips
+// anything that isn't a letter/number before it ends up in a real filename.
+function slugify(text) {
+  return String(text || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+// Shared by Download and Share — previously each built this separately,
+// and Share's copy quietly drifted to a generic "id-document" name while
+// Download used the actual document type. Single source of truth now.
+// Includes the person's name so that, e.g., downloading Aadhaar for two
+// different family members on the Family tab doesn't produce two files
+// with the identical name (which would silently overwrite one another).
+function filenameBaseFor(meta) {
+  const typeSlug = slugify(meta.idType) || "id-document";
+  const nameSlug = slugify(subjectDisplayNameOf(meta));
+  return nameSlug ? `${typeSlug}-${nameSlug}` : typeSlug;
+}
 
-<div id="customModalOverlay" class="modal-overlay hidden">
-  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="customModalMessage">
-    <p id="customModalMessage" class="modal-message"></p>
-    <div class="modal-actions">
-      <button type="button" id="customModalCancelBtn" class="link-btn">Cancel</button>
-      <button type="button" id="customModalConfirmBtn" class="primary-btn">OK</button>
-    </div>
-  </div>
-</div>
+// Fills the tab opened synchronously (to dodge iOS Safari's popup
+// blocker — see isIOS() usage below) with a visible loading message,
+// instead of leaving it truly blank while the file decrypts. A large
+// PDF over a slow connection can take a real, noticeable amount of
+// time here, and a blank white tab looks identical to a broken one.
+function showTabLoading(tab) {
+  if (!tab) return;
+  try {
+    tab.document.write(
+      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+      '<title>Kutumb Vault</title>' +
+      '<style>body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;' +
+      'background:#12181f;color:#8b93a1;font-family:system-ui,sans-serif;font-size:15px;}' +
+      '.s{display:inline-block;width:16px;height:16px;border:2px solid rgba(237,232,222,.25);' +
+      'border-top-color:#c9a227;border-radius:50%;margin-right:8px;animation:sp .7s linear infinite;' +
+      'vertical-align:-3px;}@keyframes sp{to{transform:rotate(360deg);}}</style></head>' +
+      '<body><div><span class="s"></span>Decrypting your document…</div></body></html>'
+    );
+    tab.document.close();
+  } catch (err) {
+    // Non-fatal — worst case it's just blank until navigation happens.
+  }
+}
 
-<script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js"></script>
-</body>
-</html>
+// Shown in the new tab itself, right before navigating to the actual
+// file — NOT on the original page, which the person has already
+// switched away from by this point and won't see. Auto-advances after
+// a brief pause (long enough to actually read it), but also offers an
+// immediate "Continue now" for anyone who's already read it and wants
+// to move on faster. fileUrl is always a browser-generated blob: URL,
+// never user input, so it's safe to embed directly without escaping.
+function showTabSaveTip(tab, message, fileUrl) {
+  if (!tab) return;
+  try {
+    tab.document.write(
+      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+      '<title>Kutumb Vault</title>' +
+      '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;' +
+      'background:#12181f;color:#ede8de;font-family:system-ui,sans-serif;font-size:17px;' +
+      'line-height:1.5;text-align:center;padding:32px;box-sizing:border-box;}' +
+      '.wrap{max-width:340px;}' +
+      '.wrap strong{color:#c9a227;}' +
+      'a.cta{display:inline-block;margin-top:20px;color:#8b93a1;font-size:14px;' +
+      'text-decoration:underline;}</style></head>' +
+      '<body><div class="wrap">' + message +
+      '<br><a class="cta" href="' + fileUrl + '">Continue now →</a></div>' +
+      '<script>setTimeout(function(){ window.location.href = "' + fileUrl + '"; }, 2500);</script>' +
+      '</body></html>'
+    );
+    tab.document.close();
+  } catch (err) {
+    // Non-fatal — falls through to the caller's own direct navigation.
+  }
+}
+
+// Shown in the new tab itself on failure, instead of silently closing
+// it while an alert pops up back on the original page — the person's
+// attention is already on this tab by this point, so that's where the
+// explanation needs to be, not somewhere they've already left. message
+// goes through textContent (not string-built HTML) since it can come
+// from several different sources (timeout, network, decrypt failure)
+// and shouldn't be assumed safe to concatenate directly.
+function showTabError(tab, message) {
+  if (!tab) return;
+  try {
+    tab.document.write(
+      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+      '<title>Kutumb Vault</title>' +
+      '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;' +
+      'background:#12181f;color:#ede8de;font-family:system-ui,sans-serif;font-size:16px;' +
+      'line-height:1.5;text-align:center;padding:32px;box-sizing:border-box;}' +
+      '.wrap{max-width:320px;}' +
+      '.wrap .err{color:#c0574b;font-weight:600;margin-bottom:8px;}</style></head>' +
+      '<body><div class="wrap"><div class="err">Couldn\'t open this document</div><div id="msg"></div></div></body></html>'
+    );
+    tab.document.close();
+    tab.document.getElementById("msg").textContent = message;
+  } catch (err) {
+    // Non-fatal — worst case the tab is left showing its last state
+    // (the "Decrypting..." spinner), which the person can just close.
+  }
+}
+
+/* ============================================================
+   Backend calls
+   NOTE: Content-Type is deliberately "text/plain" (not
+   "application/json") so the browser treats this as a "simple
+   request" and skips a CORS preflight, which Apps Script Web
+   Apps don't handle. The server still parses the body as JSON.
+   ============================================================ */
+// uploadFile/getFile can carry up to ~15MB of file data (~20MB once
+// base64-encoded), which can genuinely take longer than a few seconds on
+// a slow mobile connection. Lightweight calls (checkAccess, listFiles,
+// getPassphraseCheck) have no reason to ever take that long, so they get
+// a much tighter timeout to fail fast instead of leaving the UI stuck.
+const LARGE_PAYLOAD_ACTIONS = new Set(["uploadFile", "getFile"]);
+const DEFAULT_TIMEOUT_MS = 60000;
+const LARGE_PAYLOAD_TIMEOUT_MS = 120000;
+
+// uploadFile is deliberately excluded from automatic retry — unlike every
+// other action, it's not idempotent. If the original request actually
+// succeeded server-side but the response was lost in transit (exactly the
+// kind of transient failure this retry logic exists to smooth over), a
+// blind retry would create a duplicate document instead of just retrying
+// safely. Every other action here is either read-only or naturally safe
+// to repeat (e.g. deleting an already-deleted file just returns "not
+// found", overwriting the same order preference twice is harmless).
+const NON_RETRYABLE_ACTIONS = new Set(["uploadFile"]);
+// One retry, not several — this matches the actual evidence from this
+// whole investigation: failures have consistently resolved on the very
+// next attempt, never required multiple tries. Adding more retries would
+// only stretch out the worst-case wait before a genuine, non-transient
+// failure is finally shown to the person, without real evidence it'd help.
+const RETRY_DELAY_MS = 1000;
+
+async function callBackend(action, payload) {
+  const timeoutMs = LARGE_PAYLOAD_ACTIONS.has(action) ? LARGE_PAYLOAD_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+  const maxAttempts = NON_RETRYABLE_ACTIONS.has(action) ? 1 : 2;
+
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (attempt > 1) await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+    const controller = new AbortController();
+    // If nothing comes back in time, something (a network issue, a blocked
+    // request, an extension silently intercepting it) is preventing this
+    // from ever settling on its own — fail loudly instead of leaving the
+    // UI stuck on a loading message forever.
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(APPS_SCRIPT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ action, ...payload }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (!res.ok) {
+        // Transport-level failure (e.g. the intermittent 404s from Apps
+        // Script's own redirect mechanism) — worth retrying once, not a
+        // reason to give up immediately.
+        lastErr = new Error("Network error: " + res.status);
+        continue;
+      }
+      return await res.json(); // a real answer, even a logical {ok:false} from our own backend — that's not a transport failure, don't retry it
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (err.name === "AbortError") {
+        // Note: aborting here only stops the client from waiting — Apps
+        // Script may still finish executing server-side. Retrying a
+        // read-only action after its own timeout is safe regardless.
+        lastErr = new Error("Request timed out — check your connection (or try disabling browser extensions) and try again.");
+      } else {
+        lastErr = err;
+      }
+    }
+  }
+  throw lastErr;
+}
+
+
+/* ============================================================
+   Google Sign-In
+   ============================================================ */
+function handleCredentialResponse(response) {
+  const statusEl = document.getElementById("signInStatus");
+  idToken = response.credential;
+  setLoadingStatus(statusEl, "Checking access…");
+
+  callBackend("checkAccess", { idToken })
+    .then(res => {
+      if (!res.ok) {
+        setStatus(statusEl, "This Google account isn't on the family allow-list.", "error");
+        idToken = null;
+        return;
+      }
+      currentUser = { email: res.email, name: res.name };
+      document.getElementById("userName").textContent = res.name;
+      document.getElementById("userBadge").classList.remove("hidden");
+      persistAuth();
+      showScreen("screenPassphrase");
+    })
+    .catch(err => setStatus(statusEl, err.message || "Couldn't reach the vault backend. Try again.", "error"));
+}
+
+/** Clears all auth/session state. Shared by explicit sign-out and by
+ *  the automatic expired-session detection below. */
+function resetAuthState() {
+  // Must happen before idToken is cleared below — otherwise a pending
+  // delete's deferred backend call would fire later with either a null
+  // idToken (silent failure, document never actually deleted) or worse,
+  // a DIFFERENT family member's idToken if someone else signs in on
+  // this same device before the undo window naturally expires.
+  finalizePendingDelete();
+  idToken = null;
+  currentUser = null;
+  vaultKey = null;
+  allFiles = [];
+  fileListLoadedOnce = false;
+  clearPersistedAuth();
+  clearPersistedVaultKey();
+  document.getElementById("userBadge").classList.add("hidden");
+  setStatus(document.getElementById("signInStatus"), ""); // clear any leftover "Checking access..." / error text
+  // Without this, Google Identity Services silently re-selects the same
+  // account on the next "Sign in with Google" attempt instead of showing
+  // the account picker.
+  if (window.google && google.accounts && google.accounts.id) {
+    google.accounts.id.disableAutoSelect();
+  }
+}
+
+document.getElementById("signOutBtn").addEventListener("click", () => {
+  resetAuthState();
+  showScreen("screenSignIn");
+});
+
+/* ------------------------------------------------------------
+   Re-check the session whenever the app becomes visible again
+   (phone unlocked, tab switched back to, app reopened from home
+   screen). Google's ID token is short-lived (~1 hour); without this,
+   a backgrounded tab keeps showing the old signed-in state even
+   after the token has quietly expired, and nothing tells the person
+   they need to sign in again until some action fails.
+   ------------------------------------------------------------ */
+let checkingSession = false;
+async function verifySessionOnResume() {
+  if (!idToken || checkingSession) return; // nothing to check, or already checking
+  checkingSession = true;
+  try {
+    const res = await callBackend("checkAccess", { idToken });
+    if (!res.ok) {
+      resetAuthState();
+      showScreen("screenSignIn");
+      setStatus(document.getElementById("signInStatus"),
+        "Your session expired — please sign in again.", "error");
+    }
+    // else: still valid, nothing to do — the UI wasn't actually stale.
+  } catch {
+    // Network hiccup — don't force a sign-out over a transient failure.
+  } finally {
+    checkingSession = false;
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") onAppResume();
+});
+window.addEventListener("pageshow", (e) => {
+  // pageshow fires on every load, not just a bfcache restore — only the
+  // bfcache case (e.persisted) actually needs this; a fresh load already
+  // gets equivalent verification from restoreSessionOnLoad() below,
+  // making a second checkAccess call here redundant otherwise.
+  if (e.persisted) onAppResume();
+});
+
+function onAppResume() {
+  verifySessionOnResume();
+  // Self-heal a stuck "couldn't load documents" error automatically on
+  // the next natural resume, rather than requiring the manual Retry link
+  // — only meaningful once the vault is actually unlocked.
+  if (fileListLoadFailed && vaultKey) loadFileList();
+}
+
+// Keeps --header-height accurate so the sticky tab-row (see styles.css)
+// sits directly below the header, never overlapping or gapped — the
+// header's real height varies by device (safe-area-inset-top differs
+// on a notched phone vs. a plain one), so this can't be a fixed guess.
+function measureHeaderHeight() {
+  const header = document.querySelector(".topbar");
+  if (header) {
+    document.documentElement.style.setProperty("--header-height", header.offsetHeight + "px");
+  }
+}
+measureHeaderHeight();
+window.addEventListener("resize", measureHeaderHeight);
+
+// Same idea for the sticky per-person group headers on the Family tab
+// — they need to dock directly below the (also sticky) tab-row, not
+// guess a fixed pixel value. Unlike the header, the tab-row lives
+// inside #screenVault, which is display:none until unlock — reading
+// offsetHeight while hidden always returns 0 — so this can't just run
+// once at script startup like measureHeaderHeight does. showScreen()
+// calls this specifically whenever the vault screen becomes visible.
+function measureTabRowHeight() {
+  const tabRow = document.querySelector("#screenVault .tab-row");
+  if (tabRow) {
+    document.documentElement.style.setProperty("--tabrow-height", tabRow.offsetHeight + "px");
+  }
+}
+window.addEventListener("resize", () => {
+  if (!document.getElementById("screenVault").classList.contains("hidden")) measureTabRowHeight();
+});
+
+
+document.getElementById("lockBtn").addEventListener("click", () => {
+  vaultKey = null; // drop the key from memory; passphrase must be re-entered
+  clearPersistedVaultKey(); // otherwise a refresh right after Lock would silently restore it
+  showScreen("screenPassphrase");
+});
+
+/* ============================================================
+   Passphrase → AES key (PBKDF2)
+   ============================================================ */
+async function deriveKeyFromPassphrase(passphrase) {
+  const enc = new TextEncoder();
+  const baseKey = await crypto.subtle.importKey(
+    "raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: base64ToBytes(SALT_BASE64),
+      iterations: PBKDF2_ITERATIONS,
+      hash: "SHA-256",
+    },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    true, // extractable — required so the key can be persisted to sessionStorage (see persistVaultKey)
+    ["encrypt", "decrypt"]
+  );
+}
+
+document.getElementById("passphraseForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const statusEl = document.getElementById("passphraseStatus");
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  const passphrase = document.getElementById("passphraseInput").value;
+  document.getElementById("passphraseInput").value = "";
+  setButtonLoading(submitBtn, "Unlocking…");
+
+  let candidateKey;
+  try {
+    candidateKey = await deriveKeyFromPassphrase(passphrase);
+  } catch {
+    setStatus(statusEl, "Couldn't derive a key from that passphrase.", "error");
+    clearButtonLoading(submitBtn);
+    return;
+  }
+
+  let checkRes;
+  try {
+    checkRes = await callBackend("getPassphraseCheck", { idToken });
+  } catch (err) {
+    // Surface the real reason (e.g. the timeout message) instead of a
+    // generic one — this is a network/backend failure, not a bad
+    // passphrase, and the two should never look the same to the user.
+    setStatus(statusEl, err.message || "Couldn't verify the passphrase right now. Try again.", "error");
+    clearButtonLoading(submitBtn);
+    return;
+  }
+
+  if (checkRes.ok && checkRes.exists) {
+    // A canary is configured — this is the real, reliable check.
+    // AES-GCM's authentication tag fails deterministically on any
+    // wrong key, so this never gives a false positive or negative.
+    try {
+      await decryptWithKey(
+        candidateKey,
+        base64ToBytes(checkRes.ciphertextBase64),
+        base64ToBytes(checkRes.ivBase64)
+      );
+    } catch {
+      setStatus(statusEl, "That passphrase doesn't look right — try again.", "error");
+      clearButtonLoading(submitBtn);
+      return;
+    }
+  } else if (!checkRes.ok) {
+    // Couldn't reach the check at all — fail safe by refusing to
+    // proceed rather than silently skipping verification.
+    setStatus(statusEl, "Couldn't verify the passphrase right now. Try again.", "error");
+    clearButtonLoading(submitBtn);
+    return;
+  }
+  // else: no canary configured yet — proceed unverified (nothing to
+  // check against; see generate-passphrase-check.html to set one up).
+  vaultKey = candidateKey;
+  await persistVaultKey();
+  setStatus(statusEl, "");
+  clearButtonLoading(submitBtn);
+  showScreen("screenVault");
+  loadInitialVaultData();
+});
+
+/* ============================================================
+   Encrypt + upload
+   ============================================================ */
+async function encryptBytes(plainBytes) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv }, vaultKey, plainBytes
+  );
+  return { ciphertext: new Uint8Array(ciphertext), iv };
+}
+async function decryptBytes(ciphertextBytes, ivBytes) {
+  const plain = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: ivBytes }, vaultKey, ciphertextBytes
+  );
+  return new Uint8Array(plain);
+}
+// Same as decryptBytes, but takes an explicit key — used only to verify
+// the passphrase canary before vaultKey itself has been set.
+async function decryptWithKey(key, ciphertextBytes, ivBytes) {
+  const plain = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: ivBytes }, key, ciphertextBytes
+  );
+  return new Uint8Array(plain);
+}
+
+const MAX_FILE_BYTES = 15 * 1024 * 1024; // 15MB — comfortably under Apps Script's request-size limits once base64-encoded
+
+// Must stay in sync with ALLOWED_ID_TYPES in backend.gs — the backend is
+// the real enforcement point, this only controls what the dropdown offers.
+const ID_TYPE_CATEGORIES = {
+  official: ["Aadhaar", "PAN", "Passport", "Driving Licence", "Voter ID"],
+  other: ["Passport-size Photo", "Gas Passbook", "Ration Card", "Birth Certificate",
+          "Bank Passbook", "Insurance Policy", "Property Documents", "Other"],
+};
+
+function populateIdTypeOptions(category) {
+  const select = document.getElementById("idTypeSelect");
+  select.innerHTML = '<option value="" disabled selected>Select ID type</option>';
+  for (const type of ID_TYPE_CATEGORIES[category] || []) {
+    const opt = document.createElement("option");
+    opt.value = type;
+    opt.textContent = type;
+    select.appendChild(opt);
+  }
+}
+
+document.querySelectorAll("#idCategoryTabs .tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#idCategoryTabs .tab-btn").forEach(b => {
+      b.classList.toggle("active", b === btn);
+      b.setAttribute("aria-selected", b === btn ? "true" : "false");
+    });
+    populateIdTypeOptions(btn.dataset.category);
+  });
+});
+populateIdTypeOptions("official"); // initial state matches the tab marked active in the HTML
+
+/* ------------------------------------------------------------
+   Dependents — family members without their own Google account
+   (e.g. a parent without a phone). A guardian (an account holder
+   listed in her GuardianEmails, enforced server-side) uploads on her
+   behalf. listDependents only ever returns dependents the CURRENT
+   user is a guardian of — someone unrelated to her never sees her as
+   an upload option, though her documents remain visible to the whole
+   family via the normal Family tab regardless (viewing was never
+   restricted, only who can add/manage her documents is).
+   ------------------------------------------------------------ */
+let dependents = []; // only MY dependents — [{ name, addedAt }]
+let myDependentNames = new Set(); // same data, as a Set, for quick lookups (delete-menu gating)
+
+
+function populateSubjectSelect(selectedName) {
+  const select = document.getElementById("subjectSelect");
+  const previousValue = selectedName !== undefined ? selectedName : select.value;
+  select.innerHTML = '';
+  const myselfOpt = document.createElement("option");
+  myselfOpt.value = "";
+  myselfOpt.textContent = "Myself";
+  select.appendChild(myselfOpt);
+  for (const dep of dependents) {
+    const opt = document.createElement("option");
+    opt.value = dep.name;
+    opt.textContent = dep.name;
+    select.appendChild(opt);
+  }
+
+  if (previousValue && [...select.options].some(o => o.value === previousValue)) {
+    select.value = previousValue;
+  }
+}
+
+document.getElementById("openUploadBtn").addEventListener("click", () => {
+  showScreen("screenUpload");
+});
+document.getElementById("backToVaultBtn").addEventListener("click", () => {
+  showScreen("screenVault");
+});
+
+document.getElementById("fileInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById("uploadStatus");
+  const inputEl = e.target;
+  const idTypeSelect = document.getElementById("idTypeSelect");
+  const idType = idTypeSelect.value;
+  const subjectSelect = document.getElementById("subjectSelect");
+  const subjectName = subjectSelect.value; // "" = myself
+
+  if (!idType) {
+    setStatus(statusEl, "Choose a document type before uploading.", "error");
+    inputEl.value = "";
+    return;
+  }
+
+  const fileType = (file.type || "").toLowerCase();
+  if (!fileType.startsWith("image/") && fileType !== "application/pdf") {
+    setStatus(statusEl, "Only images and PDFs are allowed — no videos or other file types.", "error");
+    inputEl.value = "";
+    return;
+  }
+
+  if (file.size > MAX_FILE_BYTES) {
+    setStatus(statusEl, "That photo is too large (max 15MB). Try again with a smaller image.", "error");
+    inputEl.value = "";
+    return;
+  }
+
+  // Warn before silently creating a second copy of the same document type.
+  // Matches on ID type + broad media category (image vs PDF) + who it
+  // belongs to. For my own documents, only my own uploads count. For a
+  // dependent's documents, ANY guardian's upload counts — co-guardians
+  // share responsibility for the same person's documents.
+  const newIsPdf = (file.type || "").toLowerCase().includes("pdf");
+  const existing = allFiles.find(f =>
+    (subjectName ? true : f.uploader === currentUser.email) &&
+    f.idType === idType &&
+    (f.subjectName || "") === subjectName &&
+    ((f.mimetype || "").toLowerCase().includes("pdf")) === newIsPdf
+  );
+  if (existing) {
+    const kindLabel = newIsPdf ? "PDF" : "image";
+    const proceed = await customConfirm(`${subjectName ? subjectName : "You"} already ${subjectName ? "has" : "have"} a ${idType} (${kindLabel}) in the vault. Replace it with this new one?`);
+    if (!proceed) {
+      inputEl.value = "";
+      return;
+    }
+  }
+
+  inputEl.disabled = true;
+  setLoadingStatus(statusEl, "Encrypting on this device…");
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const { ciphertext, iv } = await encryptBytes(new Uint8Array(arrayBuffer));
+
+    setLoadingStatus(statusEl, "Uploading encrypted file…");
+    const res = await callBackend("uploadFile", {
+      idToken,
+      ciphertextBase64: bytesToBase64(ciphertext),
+      ivBase64: bytesToBase64(iv),
+      mimetype: file.type || "image/jpeg",
+      idType,
+      subjectName,
+    });
+    if (!res.ok) {
+      setStatus(statusEl, "Upload failed: " + (res.error || "unknown error"), "error");
+      return;
+    }
+
+    if (existing) {
+      // Best-effort cleanup — the new copy is already safely uploaded
+      // either way, so a failure here shouldn't be shown as an error;
+      // the old copy would just remain until deleted manually.
+      try {
+        await callBackend("deleteFile", { idToken, driveFileId: existing.driveFileId });
+      } catch (err) {
+        console.warn("Couldn't remove the replaced document:", err);
+      }
+    }
+
+    setStatus(statusEl, existing ? "Replaced in the vault." : "Saved to the vault.", "success");
+    inputEl.value = "";
+    idTypeSelect.selectedIndex = 0;
+    // Subject selection (Myself / a dependent) intentionally stays as-is —
+    // convenient when uploading several documents for the same person in
+    // a row, same reasoning as keeping the category tab selection.
+    await loadFileList();
+    setTimeout(() => {
+      showScreen("screenVault");
+      highlightNewCard(res.fileId);
+    }, 700);
+  } catch (err) {
+    setStatus(statusEl, "Something went wrong encrypting that file.", "error");
+  } finally {
+    inputEl.disabled = false;
+  }
+});
+
+/* ============================================================
+   List + decrypt-on-demand
+   ============================================================ */
+let allFiles = [];
+let fileListLoadFailed = false; // lets a resumed session auto-retry instead of leaving a stale error forever
+let fileListLoadedOnce = false; // guards against other parallel loaders (dependents, order preference) rendering before allFiles has real data
+let activeTab = "mine"; // "mine" | "family"
+let memberFilter = ""; // uploader email, "" = all
+
+// Delete is optimistic with a brief undo window, rather than an
+// immediate irreversible call — the document disappears from view
+// right away, but the actual backend deletion is deferred until the
+// window expires without an Undo tap. Only one pending delete at a
+// time, since there's only one toast to show it in; starting a new
+// delete while one is already pending finalizes the older one first.
+let pendingDelete = null; // { meta } or null
+let pendingDeleteTimeoutId = null;
+
+function showUndoToast(meta) {
+  document.getElementById("undoToastMessage").textContent = `Deleted ${meta.idType || "document"}.`;
+  document.getElementById("undoToast").classList.remove("hidden");
+}
+function hideUndoToast() {
+  document.getElementById("undoToast").classList.add("hidden");
+}
+
+// Fixed-position confirmation toast — always visible regardless of
+// scroll position, unlike writing to listStatus (which sits below the
+// entire document list, easy to end up scrolled far out of view on a
+// long list). Simple dedicated timer since this is one single element,
+// not shared across multiple different status areas the way listStatus
+// is (see statusClearTimeouts for that more general case).
+let confirmToastTimeoutId = null;
+function showConfirmToast(message) {
+  if (confirmToastTimeoutId) clearTimeout(confirmToastTimeoutId);
+  const toast = document.getElementById("confirmToast");
+  document.getElementById("confirmToastMessage").textContent = message;
+  toast.classList.remove("hidden");
+  confirmToastTimeoutId = setTimeout(() => {
+    toast.classList.add("hidden");
+    confirmToastTimeoutId = null;
+  }, 4000);
+}
+
+function finalizePendingDelete() {
+  if (!pendingDelete) return;
+  const { meta } = pendingDelete;
+  clearTimeout(pendingDeleteTimeoutId);
+  pendingDelete = null;
+  pendingDeleteTimeoutId = null;
+  hideUndoToast();
+  callBackend("deleteFile", { idToken, driveFileId: meta.driveFileId }).catch(err => {
+    // Best-effort — the document already looks deleted in the UI (and
+    // stays that way until the next refresh); the undo window has
+    // already closed, so there's nothing more useful to surface here
+    // than a console note for debugging.
+    console.warn("Couldn't finalize delete:", err);
+  });
+}
+document.getElementById("undoDeleteBtn").addEventListener("click", () => {
+  if (!pendingDelete) return;
+  const { meta } = pendingDelete;
+  clearTimeout(pendingDeleteTimeoutId);
+  pendingDelete = null;
+  pendingDeleteTimeoutId = null;
+  hideUndoToast();
+  allFiles.push(meta);
+  populateMemberFilter();
+  renderFileList();
+});
+
+// Closes any open per-card "⋯" menu — called both when a click lands
+// outside every menu, and before opening a different one (so at most
+// one menu is ever open at a time).
+function closeAllFileMenus() {
+  document.querySelectorAll(".file-menu-dropdown.open").forEach(d => d.classList.remove("open"));
+}
+document.addEventListener("click", closeAllFileMenus);
+
+const cardCleanups = new WeakMap(); // card element -> cleanup function, run just before the card is discarded
+
+// A document either belongs to the account holder who uploaded it, or
+// to a dependent they uploaded it on behalf of. These two helpers give
+// a single consistent identity/display-name across both cases, used by
+// the member filter and the file card's "who" label.
+function subjectKeyOf(f) {
+  return f.subjectName ? "dep:" + f.subjectName : f.uploader;
+}
+function subjectDisplayNameOf(f) {
+  return f.subjectName || f.uploaderName || f.uploader;
+}
+
+/* ------------------------------------------------------------
+   Family-view ordering: dependents always come first by default,
+   with an optional PERSONAL override. Stored on the backend, keyed to
+   the caller's own verified email, so it follows the person across
+   devices — same as everything else in this app. Loaded once per
+   session as part of loadInitialVaultData(), then read synchronously
+   here.
+   ------------------------------------------------------------ */
+let memberOrderPreference = []; // cached in-memory after loading from the backend once per session
+
+
+async function saveMemberOrderPreference(orderedKeys) {
+  memberOrderPreference = orderedKeys; // apply locally right away, don't wait on the network
+  try {
+    await callBackend("setMemberOrderPreference", { idToken, order: orderedKeys });
+  } catch (err) {
+    // Non-fatal — it's still applied for this session; just might not
+    // have saved server-side this time (e.g. a network hiccup).
+  }
+}
+
+// Every distinct subject currently in the vault, unordered — used both
+// to build the ordered list below and to populate the reorder panel.
+// Deliberately excludes the current user's own (non-dependent)
+// documents — those are already fully covered by My IDs, so offering
+// "yourself" as a filterable/orderable Family member would be
+// pointless. A dependent you're a guardian of still appears normally,
+// since that's a different person, not you.
+function getAllDistinctSubjects() {
+  const seen = new Map(); // subjectKey -> display name
+  for (const f of allFiles) {
+    const key = subjectKeyOf(f);
+    if (key === currentUser.email) continue;
+    if (!seen.has(key)) seen.set(key, subjectDisplayNameOf(f));
+  }
+  return seen;
+}
+
+// Combines the personal preference (if any) with the default order
+// (dependents first, then alphabetical) for whoever wasn't explicitly
+// placed. Used by both the member filter dropdown and the Family-tab
+// document list, so they always agree with each other.
+function getOrderedSubjects() {
+  const seen = getAllDistinctSubjects();
+  const allKeys = [...seen.keys()];
+
+  const defaultOrder = allKeys.slice().sort((a, b) => {
+    const aIsDep = a.startsWith("dep:");
+    const bIsDep = b.startsWith("dep:");
+    if (aIsDep !== bIsDep) return aIsDep ? -1 : 1;
+    return seen.get(a).localeCompare(seen.get(b));
+  });
+
+  const preference = memberOrderPreference.filter(k => seen.has(k)); // drop stale keys no longer present
+  const remaining = defaultOrder.filter(k => !preference.includes(k));
+  return [...preference, ...remaining].map(key => ({ key, name: seen.get(key) }));
+}
+
+function populateMemberFilter() {
+  const select = document.getElementById("memberFilterSelect");
+  const previousValue = select.value;
+  const ordered = getOrderedSubjects();
+
+  select.innerHTML = '<option value="">All family members</option>';
+  for (const { key, name } of ordered) {
+    const opt = document.createElement("option");
+    opt.value = key;
+    opt.textContent = name;
+    select.appendChild(opt);
+  }
+  // Keep the previous selection if that member still has files.
+  if (previousValue && ordered.some(o => o.key === previousValue)) {
+    select.value = previousValue;
+  } else {
+    memberFilter = "";
+  }
+}
+
+async function loadFileList() {
+  const listStatus = document.getElementById("listStatus");
+  setLoadingStatus(listStatus, "Loading…");
+  try {
+    const res = await callBackend("listFiles", { idToken });
+    if (!res.ok) {
+      showListLoadError(listStatus, "Couldn't load documents.");
+      return;
+    }
+    fileListLoadFailed = false;
+    fileListLoadedOnce = true;
+    allFiles = res.files;
+    populateMemberFilter();
+    renderFileList();
+  } catch (err) {
+    showListLoadError(listStatus, err.message || "Couldn't reach the vault backend.");
+  }
+}
+
+// Used specifically for the initial load right after unlock — combines
+// what used to be three separate parallel calls (listFiles,
+// listDependents, getMemberOrderPreference) into one round-trip. Same
+// total work, but fewer chances to land on a slow request given this
+// backend's measured latency variance. Since everything arrives together
+// now, there's no race to guard against (unlike the old three-parallel-
+// calls version) — just set all the state, then render once.
+async function loadInitialVaultData() {
+  const listStatus = document.getElementById("listStatus");
+  setLoadingStatus(listStatus, "Loading…");
+  try {
+    const res = await callBackend("getInitialVaultData", { idToken });
+    if (!res.ok) {
+      showListLoadError(listStatus, "Couldn't load documents.", loadInitialVaultData);
+      return;
+    }
+    fileListLoadFailed = false;
+    fileListLoadedOnce = true;
+    allFiles = res.files;
+    dependents = res.dependents;
+    myDependentNames = new Set(dependents.map(d => d.name));
+    memberOrderPreference = Array.isArray(res.order) ? res.order : [];
+    populateSubjectSelect();
+    populateMemberFilter();
+    renderFileList();
+  } catch (err) {
+    showListLoadError(listStatus, err.message || "Couldn't reach the vault backend.", loadInitialVaultData);
+  }
+}
+
+
+// Shows a load failure with a "Retry" link, and remembers the failure so
+// it can be retried automatically the next time the app becomes visible
+// again — without this, the message just sits there forever, since
+// nothing else ever touches listStatus unless another load happens to
+// succeed on its own.
+function showListLoadError(el, msg, retryFn) {
+  const existing = statusClearTimeouts.get(el);
+  if (existing) { clearTimeout(existing); statusClearTimeouts.delete(el); }
+  fileListLoadFailed = true;
+  el.textContent = "";
+  el.className = "status error";
+  el.appendChild(document.createTextNode(msg + " "));
+  const retryBtn = document.createElement("button");
+  retryBtn.type = "button";
+  retryBtn.className = "link-btn";
+  retryBtn.textContent = "Retry";
+  retryBtn.addEventListener("click", () => (retryFn || loadFileList)());
+  el.appendChild(retryBtn);
+}
+
+function renderFileList() {
+  const listEl = document.getElementById("fileList");
+  const listStatus = document.getElementById("listStatus");
+  const filterVal = document.getElementById("filterSelect").value;
+
+  let scoped;
+  if (activeTab === "mine") {
+    scoped = allFiles.filter(f => !f.subjectName && f.uploader === currentUser.email);
+  } else {
+    // Family never includes the current user's own (non-dependent)
+    // documents — those are already fully covered by My IDs, so
+    // showing them here too would just be redundant. A dependent's
+    // document you uploaded still shows normally, since that belongs
+    // to the dependent, not you.
+    const familyFiles = allFiles.filter(f => subjectKeyOf(f) !== currentUser.email);
+    scoped = memberFilter ? familyFiles.filter(f => subjectKeyOf(f) === memberFilter) : familyFiles;
+  }
+
+  const filtered = filterVal ? scoped.filter(f => f.idType === filterVal) : scoped;
+
+  // Dependents first, then personal-preference order, matching the
+  // member filter dropdown — only meaningful on Family (My IDs is
+  // always just one person, so there's nothing to reorder).
+  if (activeTab === "family") {
+    const rank = new Map(getOrderedSubjects().map((o, i) => [o.key, i]));
+    filtered.sort((a, b) => (rank.get(subjectKeyOf(a)) ?? 999) - (rank.get(subjectKeyOf(b)) ?? 999));
+  }
+
+  // Release resources held by the cards about to be discarded: revoke
+  // any decrypted blob URL (see cardCleanups below), and cancel a
+  // pending highlight-removal timer if one is still running — without
+  // this, the timer's closure keeps the about-to-be-discarded card
+  // element alive in memory for its remaining duration instead of
+  // letting it be garbage collected right away.
+  if (highlightTimeoutId) { clearTimeout(highlightTimeoutId); highlightTimeoutId = null; }
+  for (const oldCard of listEl.children) {
+    const cleanup = cardCleanups.get(oldCard);
+    if (cleanup) cleanup();
+  }
+  listEl.innerHTML = "";
+  if (activeTab === "family") {
+    // Group by person so it's easy to tell whose documents you're
+    // looking at, instead of scanning a flat mixed list. Works
+    // correctly whether unfiltered (multiple groups) or filtered to
+    // one person (naturally produces exactly one group/header — still
+    // sticky, so the "whose documents" context never scrolls away,
+    // even when there's only one person in view). `filtered` is
+    // already sorted by the dependents-first/preference order above,
+    // and Map preserves insertion order, so the groups come out in
+    // that same order for free — no extra sort needed here.
+    const groups = new Map(); // subjectKey -> { name, files: [] }
+    for (const meta of filtered) {
+      const key = subjectKeyOf(meta);
+      if (!groups.has(key)) groups.set(key, { name: subjectDisplayNameOf(meta), files: [] });
+      groups.get(key).files.push(meta);
+    }
+    for (const group of groups.values()) {
+      const header = document.createElement("div");
+      header.className = "member-group-header";
+      header.textContent = `${group.name} (${group.files.length})`;
+      listEl.appendChild(header);
+      for (const meta of group.files) {
+        listEl.appendChild(buildFileCard(meta));
+      }
+    }
+  } else {
+    for (const meta of filtered) {
+      listEl.appendChild(buildFileCard(meta));
+    }
+  }
+  setStatus(listStatus, filtered.length ? "" :
+    (activeTab === "mine" ? "You haven't uploaded any documents yet." : "No documents match this filter."));
+}
+
+document.getElementById("filterSelect").addEventListener("change", renderFileList);
+
+document.getElementById("memberFilterSelect").addEventListener("change", (e) => {
+  memberFilter = e.target.value;
+  renderFileList();
+});
+
+/* ------------------------------------------------------------
+   "Order family members" panel — tap chips in the order you want;
+   tap again to remove one (the rest renumber automatically).
+   ------------------------------------------------------------ */
+let pendingMemberOrder = []; // subject keys, in tap order, only while the panel is open
+
+function renderMemberOrderChips() {
+  const container = document.getElementById("memberOrderChips");
+  container.innerHTML = "";
+  const seen = getAllDistinctSubjects();
+  // Show in the current default order so the chips themselves aren't
+  // jumping around as you tap — only the badges/selection change.
+  const displayOrder = [...seen.keys()].sort((a, b) => {
+    const aIsDep = a.startsWith("dep:");
+    const bIsDep = b.startsWith("dep:");
+    if (aIsDep !== bIsDep) return aIsDep ? -1 : 1;
+    return seen.get(a).localeCompare(seen.get(b));
+  });
+
+  for (const key of displayOrder) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "member-order-chip";
+    const idx = pendingMemberOrder.indexOf(key);
+    if (idx !== -1) {
+      chip.classList.add("selected");
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = String(idx + 1);
+      chip.appendChild(badge);
+    }
+    chip.appendChild(document.createTextNode(seen.get(key)));
+    chip.addEventListener("click", () => {
+      const i = pendingMemberOrder.indexOf(key);
+      if (i !== -1) {
+        pendingMemberOrder.splice(i, 1); // tap again to remove — remaining renumber
+      } else {
+        pendingMemberOrder.push(key);
+      }
+      renderMemberOrderChips();
+    });
+    container.appendChild(chip);
+  }
+}
+
+document.getElementById("orderMembersBtn").addEventListener("click", () => {
+  pendingMemberOrder = memberOrderPreference.filter(k => getAllDistinctSubjects().has(k));
+  renderMemberOrderChips();
+  document.getElementById("memberOrderPanel").classList.remove("hidden");
+});
+
+document.getElementById("saveMemberOrderBtn").addEventListener("click", async (e) => {
+  setButtonLoading(e.target, "Saving…");
+  await saveMemberOrderPreference(pendingMemberOrder);
+  clearButtonLoading(e.target);
+  document.getElementById("memberOrderPanel").classList.add("hidden");
+  populateMemberFilter();
+  renderFileList();
+  showConfirmToast("Order saved.");
+});
+
+document.getElementById("resetMemberOrderBtn").addEventListener("click", () => {
+  pendingMemberOrder = [];
+  renderMemberOrderChips();
+});
+
+document.getElementById("cancelMemberOrderBtn").addEventListener("click", () => {
+  document.getElementById("memberOrderPanel").classList.add("hidden");
+});
+
+function setActiveTab(tab) {
+  activeTab = tab;
+  const mineBtn = document.getElementById("tabMine");
+  const familyBtn = document.getElementById("tabFamily");
+  const memberSelect = document.getElementById("memberFilterSelect");
+  const orderBtn = document.getElementById("orderMembersBtn");
+  mineBtn.classList.toggle("active", tab === "mine");
+  familyBtn.classList.toggle("active", tab === "family");
+  mineBtn.setAttribute("aria-selected", tab === "mine");
+  familyBtn.setAttribute("aria-selected", tab === "family");
+  memberSelect.classList.toggle("hidden", tab !== "family");
+  orderBtn.classList.toggle("hidden", tab !== "family");
+  if (tab !== "family") {
+    memberFilter = "";
+    memberSelect.value = "";
+    document.getElementById("memberOrderPanel").classList.add("hidden");
+  }
+  // Document-type filter is active on BOTH tabs (unlike the member
+  // filter, which only exists on Family) — a value picked on one tab
+  // was silently carrying over to the other, filtering out documents
+  // with no visible explanation why. Reset it on every switch so each
+  // tab always starts from a clean, predictable "All document types".
+  document.getElementById("filterSelect").value = "";
+  renderFileList();
+}
+document.getElementById("tabMine").addEventListener("click", () => setActiveTab("mine"));
+document.getElementById("tabFamily").addEventListener("click", () => setActiveTab("family"));
+
+// Scrolls a freshly uploaded document into view and gives it a brief
+// highlight flash, closing the "did it work, and where did it go" gap
+// — especially relevant now that documents land inside a specific
+// person's group rather than obviously at the top of a flat list. If
+// the current tab/filter doesn't happen to show this document, this
+// silently does nothing rather than force-switching the person's view.
+let highlightTimeoutId = null; // cleared in renderFileList if a re-render discards the card before this fires
+function highlightNewCard(driveFileId) {
+  if (!driveFileId) return;
+  const card = document.querySelector(`.file-card[data-drive-file-id="${CSS.escape(driveFileId)}"]`);
+  if (!card) return;
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.classList.add("file-card-highlight");
+  if (highlightTimeoutId) clearTimeout(highlightTimeoutId);
+  highlightTimeoutId = setTimeout(() => {
+    card.classList.remove("file-card-highlight");
+    highlightTimeoutId = null;
+  }, 2000);
+}
+
+function buildFileCard(meta) {
+  const card = document.createElement("div");
+  card.className = "file-card";
+  card.dataset.driveFileId = meta.driveFileId;
+
+  const thumb = document.createElement("div");
+  thumb.className = "file-thumb file-thumb-label";
+  if (ID_TYPE_CATEGORIES.official.includes(meta.idType)) {
+    thumb.classList.add("file-thumb-official");
+  }
+  const isPdf = (meta.mimetype || "").toLowerCase().includes("pdf");
+  // Fully static markup (never derived from meta/user data), matching
+  // the existing precedent elsewhere in this file of using innerHTML
+  // only for fixed, trusted strings — same reasoning as the "All
+  // family members" option markup a few lines below.
+  const PDF_ICON_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 3h9l4 4v14a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M15 3v4h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><line x1="8" y1="13" x2="16" y2="13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><line x1="8" y1="16" x2="13" y2="16" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+  const IMG_ICON_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8.5" cy="9.5" r="1.6" fill="currentColor"/><path d="M3 16l5-5 4 4 3-3 6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+  thumb.innerHTML = (isPdf ? PDF_ICON_SVG : IMG_ICON_SVG) + "<span>" + (isPdf ? "PDF" : "IMG") + "</span>";
+  card.appendChild(thumb);
+
+  const metaEl = document.createElement("div");
+  metaEl.className = "file-meta";
+
+  const whoEl = document.createElement("div");
+  whoEl.className = "who";
+  // Built with textContent, not innerHTML — meta.idType is technically
+  // attacker-controllable (a family member could bypass the <select> and
+  // POST an arbitrary string to the backend), so it must never be treated
+  // as HTML here.
+  whoEl.textContent = meta.idType || "Document";
+  metaEl.appendChild(whoEl);
+
+  const whenEl = document.createElement("div");
+  whenEl.className = "when";
+  whenEl.textContent = new Date(meta.date).toLocaleString();
+  metaEl.appendChild(whenEl);
+
+  card.appendChild(metaEl);
+
+  // Delete is shown for the document's own uploader, or — for a
+  // dependent's document — any of her current guardians (co-guardians
+  // can manage each other's uploads for the same dependent). This is a
+  // convenience only; the backend enforces the same rule independently
+  // and will refuse the request even if this check were somehow bypassed.
+  const canManage = meta.uploader === currentUser.email ||
+    (meta.subjectName && myDependentNames.has(meta.subjectName));
+  if (canManage) {
+    const menuWrap = document.createElement("div");
+    menuWrap.className = "file-menu";
+
+    const menuBtn = document.createElement("button");
+    menuBtn.className = "file-menu-btn";
+    menuBtn.textContent = "⋯";
+    menuBtn.setAttribute("aria-label", "More options");
+    menuWrap.appendChild(menuBtn);
+
+    const dropdown = document.createElement("div");
+    dropdown.className = "file-menu-dropdown";
+    const deleteItem = document.createElement("button");
+    deleteItem.className = "file-menu-item";
+    deleteItem.textContent = "Delete";
+    dropdown.appendChild(deleteItem);
+    menuWrap.appendChild(dropdown);
+
+    menuBtn.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't let the global listener immediately close this
+      const wasOpen = dropdown.classList.contains("open");
+      closeAllFileMenus();
+      if (!wasOpen) dropdown.classList.add("open");
+    });
+
+    deleteItem.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      dropdown.classList.remove("open");
+      const label = meta.idType || "this document";
+      if (!(await customConfirm(`Delete this ${label}?`))) return;
+
+      // Only one pending delete at a time — if a previous one is still
+      // in its undo window, finalize it now before starting this one.
+      finalizePendingDelete();
+
+      allFiles = allFiles.filter(f => f.driveFileId !== meta.driveFileId);
+      populateMemberFilter();
+      renderFileList(); // also runs the usual cardCleanups for every discarded card, including this one
+
+      pendingDelete = { meta };
+      pendingDeleteTimeoutId = setTimeout(finalizePendingDelete, 6000);
+      showUndoToast(meta);
+    });
+
+    card.appendChild(menuWrap);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "file-actions";
+
+  const viewBtn = document.createElement("button");
+  viewBtn.className = "icon-btn";
+  viewBtn.textContent = "View";
+  actions.appendChild(viewBtn);
+
+  const downloadBtn = document.createElement("button");
+  downloadBtn.className = "icon-btn";
+  downloadBtn.textContent = "Download";
+  actions.appendChild(downloadBtn);
+
+  const shareBtn = document.createElement("button");
+  shareBtn.className = "icon-btn";
+  shareBtn.textContent = "Share";
+  actions.appendChild(shareBtn);
+
+  card.appendChild(actions);
+
+  let decryptedBlob = null; // cached after first decrypt, per session only
+  let decryptedUrl = null;  // one object URL reused by View/Download/Share, revoked on cleanup
+  let decryptPromise = null; // in-flight/cached promise — prevents duplicate concurrent decrypts
+
+  function ensureDecrypted() {
+    if (decryptPromise) return decryptPromise; // covers both "already decrypted" and "decrypt in progress"
+    decryptPromise = (async () => {
+      const res = await callBackend("getFile", { idToken, driveFileId: meta.driveFileId });
+      if (!res.ok) throw new Error(res.error || "Couldn't fetch this document — try again.");
+      let plainBytes;
+      try {
+        plainBytes = await decryptBytes(
+          base64ToBytes(res.ciphertextBase64),
+          base64ToBytes(meta.ivBase64)
+        );
+      } catch (err) {
+        // Only a genuine decryption failure (wrong key, corrupted/tampered
+        // ciphertext) reaches here — network/timeout errors above already
+        // threw their own accurate message and never get this one.
+        throw new Error("Couldn't decrypt this file — check the passphrase.");
+      }
+      decryptedBlob = new Blob([plainBytes], { type: meta.mimetype || "image/jpeg" });
+      decryptedUrl = URL.createObjectURL(decryptedBlob);
+      return decryptedBlob;
+    })();
+    // Don't permanently cache a failure — let the next call (e.g. a manual
+    // "View" tap after a previous attempt failed) retry from scratch.
+    decryptPromise.catch(() => { decryptPromise = null; });
+    return decryptPromise;
+  }
+
+  cardCleanups.set(card, () => {
+    if (decryptedUrl) URL.revokeObjectURL(decryptedUrl);
+  });
+
+  viewBtn.addEventListener("click", async () => {
+    // iOS Safari's popup blocker only allows window.open() when called
+    // synchronously from the click — not after an awaited decrypt. So we
+    // open a blank tab right away and fill in its location once ready.
+    // Android intentionally does NOT use this tab trick — reverted per
+    // real family feedback preferring the simpler, original direct
+    // behavior. Known tradeoff: Android Chrome's popup blocker can in
+    // principle also block a delayed window.open() like the one below,
+    // same category of risk iOS has — this is a conscious choice to
+    // accept that theoretical risk in exchange for the simpler
+    // experience people actually preferred in practice.
+    const tab = isIOS() ? window.open("", "_blank") : null;
+    showTabLoading(tab);
+    setButtonLoading(viewBtn, "Opening…");
+    try {
+      await ensureDecrypted();
+      if (tab) {
+        tab.location.href = decryptedUrl;
+      } else {
+        window.open(decryptedUrl, "_blank");
+      }
+    } catch (err) {
+      const msg = (err && err.message) || "Couldn't decrypt this file — check the passphrase.";
+      if (tab) {
+        showTabError(tab, msg);
+      } else {
+        await customAlert(msg);
+      }
+    } finally {
+      clearButtonLoading(viewBtn);
+    }
+  });
+
+  downloadBtn.addEventListener("click", async () => {
+    const filenameBase = filenameBaseFor(meta);
+    // iOS Safari ignores the `download` attribute on blob URLs entirely —
+    // it just navigates to the file instead of saving it, so iOS still
+    // needs the tab-based workaround. Android intentionally does NOT —
+    // reverted per real family feedback preferring the simpler, original
+    // silent-download experience. Known tradeoff, accepted deliberately:
+    // Android Chrome's built-in PDF viewer can in principle still
+    // intercept a PDF blob URL here and just display it instead of
+    // saving, for PDFs specifically (images are unaffected). That risk
+    // is being knowingly traded for the simpler behavior people actually
+    // preferred in practice.
+    const tab = isIOS() ? window.open("", "_blank") : null;
+    showTabLoading(tab);
+    setButtonLoading(downloadBtn, "Downloading…");
+    try {
+      await ensureDecrypted();
+      const ext = extFromMimetype(meta.mimetype);
+      if (tab) {
+        const guidance = 'Tap the <strong>Share</strong> icon, then "Save to Files" or "Save Image", to keep this document.';
+        showTabSaveTip(tab, guidance, decryptedUrl);
+        showConfirmToast("Opened for saving.");
+      } else {
+        const a = document.createElement("a");
+        a.href = decryptedUrl;
+        a.download = `${filenameBase}.${ext}`;
+        a.click();
+        // Deliberately delayed — if this is a repeat download, Chrome
+        // shows its own native "Download again?" dialog, which we have
+        // no way to detect or wait for from JavaScript. This gives that
+        // dialog a moment to appear first, rather than both trying to
+        // show at the exact same instant.
+        setTimeout(() => showConfirmToast(`Downloaded ${filenameBase}.${ext}`), 600);
+      }
+    } catch (err) {
+      const msg = (err && err.message) || "Couldn't decrypt this file — check the passphrase.";
+      if (tab) {
+        showTabError(tab, msg);
+      } else {
+        await customAlert(msg);
+      }
+    } finally {
+      clearButtonLoading(downloadBtn);
+    }
+  });
+
+  shareBtn.addEventListener("click", async () => {
+    setButtonLoading(shareBtn, "Preparing…");
+    try {
+      const blob = await ensureDecrypted();
+      const ext = extFromMimetype(meta.mimetype);
+      const filenameBase = filenameBaseFor(meta);
+      const fileForShare = new File([blob], `${filenameBase}.${ext}`, { type: blob.type });
+      if (navigator.canShare && navigator.canShare({ files: [fileForShare] })) {
+        await navigator.share({ files: [fileForShare], title: meta.idType || "ID document" });
+      } else {
+        const a = document.createElement("a");
+        a.href = decryptedUrl;
+        a.download = `${filenameBase}.${ext}`;
+        a.click();
+      }
+    } catch (err) {
+      if (err && err.name === "AbortError") {
+        // Person just canceled the native share sheet — not a real error.
+        return;
+      }
+      await customAlert((err && err.message) || "Couldn't decrypt this file — check the passphrase.");
+    } finally {
+      clearButtonLoading(shareBtn);
+    }
+  });
+
+  return card;
+}
+
+/* ============================================================
+   Startup — attempt to restore a persisted session
+   ------------------------------------------------------------
+   Runs once when the script first loads (including on every refresh).
+   The saved idToken is always re-verified against the backend before
+   being trusted — it could have quietly expired since it was saved,
+   and this is also what stops a tampered/stale sessionStorage value
+   from silently granting access.
+   ============================================================ */
+(async function restoreSessionOnLoad() {
+  const savedAuthRaw = sessionStorage.getItem(SESSION_AUTH_KEY);
+  if (!savedAuthRaw) return; // nothing saved — default screenSignIn stays showing
+
+  let savedAuth;
+  try {
+    savedAuth = JSON.parse(savedAuthRaw);
+  } catch {
+    clearPersistedAuth();
+    return;
+  }
+  if (!savedAuth.idToken || !savedAuth.currentUser) {
+    clearPersistedAuth();
+    return;
+  }
+
+  let checkRes;
+  try {
+    checkRes = await callBackend("checkAccess", { idToken: savedAuth.idToken });
+  } catch {
+    // Transient network issue — leave the sign-in screen showing rather
+    // than wiping a possibly-still-valid saved session over a hiccup.
+    return;
+  }
+  if (!checkRes.ok) {
+    clearPersistedAuth();
+    clearPersistedVaultKey();
+    return;
+  }
+
+  idToken = savedAuth.idToken;
+  currentUser = savedAuth.currentUser;
+  document.getElementById("userName").textContent = currentUser.name;
+  document.getElementById("userBadge").classList.remove("hidden");
+
+  const savedKeyBase64 = sessionStorage.getItem(SESSION_VAULTKEY_KEY);
+  if (savedKeyBase64) {
+    try {
+      vaultKey = await crypto.subtle.importKey(
+        "raw", base64ToBytes(savedKeyBase64), { name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]
+      );
+      showScreen("screenVault");
+      loadInitialVaultData();
+      return;
+    } catch {
+      clearPersistedVaultKey(); // fall through to the passphrase screen below
+    }
+  }
+  showScreen("screenPassphrase");
+})();
